@@ -502,8 +502,8 @@ Este **TERMO** terá vigência conforme descrito na tabela abaixo, podendo ser r
     **O(A) concedente designará para supervisor(a) do Estágio:**  
     """)
 
-    nome_supervisor = gr.Text(label="Nome do(a) Supervisor(a)", placeholder="Ex: José da Silva")
-    formacao_supervisor = gr.Text(label="Formação do(a) Supervisor(a)", placeholder="Ex: Advogado")
+    nome_supervisor = gr.Text(label="Nome do(a) Supervisor(a)*", placeholder="Ex: José da Silva")
+    formacao_supervisor = gr.Text(label="Formação do(a) Supervisor(a)*", placeholder="Ex: Advogado")
     registro_conselho = gr.Text(label="Nº do registro no conselho (quando este o exigir)", placeholder="Ex: OAB-TO: 0.000")
 
     gr.Markdown("""
