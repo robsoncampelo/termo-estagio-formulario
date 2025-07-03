@@ -217,7 +217,7 @@ def processar_formulario(*args):
     return [None] * len(args)
 
 
-with gr.Blocks() as demo:
+with gr.Blocks(theme="default") as demo:
 
     gr.Markdown("<h2 style='text-align: center;'>TERMO DE COMPROMISSO DE ESTÁGIO</h2>")
 
@@ -552,11 +552,7 @@ import os
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
-    demo.queue().launch(
-        server_name="0.0.0.0",
-        server_port=port,
-        theme="default"  # Força o tema claro
-    )
+    demo.queue().launch(server_name="0.0.0.0", server_port=port)
 
 
 # In[ ]:
