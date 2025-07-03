@@ -237,14 +237,14 @@ with gr.Blocks() as demo:
 
     with gr.Row():
         razao_social = gr.Text(label="Razão Social*")
-        cnpj = gr.Text(label="CNPJ*")
+        cnpj = gr.Text(label="CNPJ (00.000.000/0000-00)*", placeholder="Ex: 12.345.678/0001-99")
 
     nome_fantasia = gr.Text(label="Nome Fantasia*")
 
     with gr.Row():
         endereco = gr.Text(label="Endereço*")
         bairro = gr.Text(label="Bairro*")
-        cep = gr.Text(label="CEP (00000-00)*", placeholder="Ex: 12345-000")
+        cep = gr.Text(label="CEP (00000-000)*", placeholder="Ex: 12345-000")
 
     with gr.Row():
         complemento = gr.Text(label="Complemento")
@@ -256,7 +256,10 @@ with gr.Blocks() as demo:
                 "MG", "MS", "MT", "PA", "PB", "PE", "PI", "PR", "RJ", "RN",
                 "RO", "RR", "RS", "SC", "SE", "SP", "TO"
             ],
-            value=None)
+            value=None,
+            type="value",        # retorna o texto selecionado
+            interactive=True     # garante que está habilitado para o usuário
+        )
 
     with gr.Row():
         email = gr.Text(label="E-mail*")
@@ -292,7 +295,9 @@ with gr.Blocks() as demo:
                 "MG", "MS", "MT", "PA", "PB", "PE", "PI", "PR", "RJ", "RN",
                 "RO", "RR", "RS", "SC", "SE", "SP", "TO"
             ],
-            value=None
+            value=None,
+            type="value",        # retorna o texto selecionado
+            interactive=True     # garante que está habilitado para o usuário
         )
 
     with gr.Row():
@@ -547,7 +552,11 @@ import os
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
-    demo.queue().launch(server_name="0.0.0.0", server_port=port)
+    demo.queue().launch(
+        server_name="0.0.0.0",
+        server_port=port,
+        theme="default"  # Força o tema claro
+    )
 
 
 # In[ ]:
