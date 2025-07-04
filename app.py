@@ -3,6 +3,8 @@
 
 # In[3]:
 
+import gradio as gr
+from datetime import datetime
 
 def calcular_total_dias(data_inicio, data_termino):
     try:
