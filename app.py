@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[5]:
+# In[1]:
 
 
 import gradio as gr
@@ -109,8 +109,6 @@ def processar_formulario(*args):
         "apolice": "Nº da Apólice de Seguro",
         "modalidade_estagio": "Modalidade do Estágio",
         "remunerado": "Remunerado",
-        "valor_bolsa": "Valor da Bolsa",
-        "valor_extenso": "Valor por Extenso",
         "auxilio_transporte": "Auxílio Transporte",
         "contraprestacao": "Contraprestação de Serviços",
         "horas_diarias_plano": "Horas Diárias no Plano",
@@ -120,6 +118,9 @@ def processar_formulario(*args):
         "nome_supervisor": "Nome do(a) Supervisor(a)",
         "formacao_supervisor": "Formação do(a) Supervisor(a)"
     }
+
+#     "valor_bolsa": "Valor da Bolsa",
+#         "valor_extenso": "Valor por Extenso",
 
     # Desempacotamento
     (
@@ -141,6 +142,15 @@ def processar_formulario(*args):
         nome_supervisor, formacao_supervisor, registro_conselho
     ) = args
 
+    if remunerado == "Sim":
+        if not str(valor_bolsa).strip():
+            gr.Warning("⚠️ O campo 'Valor da Bolsa' é obrigatório para a opção Sim.")
+            return [gr.update() for _ in args]
+
+        if not str(valor_extenso).strip():
+            gr.Warning("⚠️ O campo 'Valor por Extenso' é obrigatório para a opção Sim.")
+            return [gr.update() for _ in args]
+
     # 5. Validação condicional de campos dependentes
     if auxilio_transporte == "Sim":
         if not str(especificacao_auxilio).strip():
@@ -149,7 +159,7 @@ def processar_formulario(*args):
 
     if contraprestacao == "Sim":
         if not str(especificacao_contraprestacao).strip():
-            gr.Warning("⚠️ O campo 'Especificação da Contraprestação de Serviços' é obrigatório para a opção Sim.")
+            gr.Warning("⚠️ O campo 'Especificação da Contraprestação' é obrigatório para a opção Sim.")
             return [gr.update() for _ in args]
 
 
@@ -170,9 +180,14 @@ def processar_formulario(*args):
         gr.Warning("Você precisa informar a data de início e término do estágio.")
         return [gr.update() for _ in args]
 
+    if not nascimento:
+        gr.Warning(f"⚠️ O campo 'Data de Nascimento' é obrigatório")
+        return [gr.update() for _ in args]
+
     try:
         dt_inicio = datetime.strptime(data_inicio, "%Y-%m-%d")
         dt_termino = datetime.strptime(data_termino, "%Y-%m-%d")
+        dt_nascimento = datetime.strptime(nascimento, "%Y-%m-%d")
     except ValueError:
         gr.Warning("Formato inválido de data. Use o seletor de calendário.")
         return [gr.update() for _ in args]
@@ -183,7 +198,7 @@ def processar_formulario(*args):
 
     data_inicio = dt_inicio.strftime("%d/%m/%Y")
     data_termino = dt_termino.strftime("%d/%m/%Y")
-
+    nascimento = dt_nascimento.strftime("%d/%m/%Y")
 
 #     atividades = [
 #         atividade_1, atividade_2, atividade_3, atividade_4, atividade_5,
@@ -275,8 +290,7 @@ with gr.Blocks(theme="default") as demo:
     tipo_estagio = gr.Radio(
         choices=["CURRICULAR OBRIGATÓRIO", "NÃO OBRIGATÓRIO"],
         label="Tipo de Estágio*",
-        value=None,
-        elem_id="campo_tipo_estagio"
+        value=None
     )
 
     gr.Markdown("**Instrumento Jurídico de Termo de Compromisso de Estágio, sem vínculo empregatício, de que trata o art. 7º, inciso I da lei nº 11.788/2008.**")
@@ -326,7 +340,19 @@ with gr.Blocks(theme="default") as demo:
     nome_estudante = gr.Text(label="Nome*")
 
     with gr.Row():
-        nascimento = gr.Text(label="Data de Nascimento (dd/mm/aaaa)*", placeholder="Ex: 25/06/2005")
+        # Campo visual com seletor de data
+        gr.HTML("""
+        <label for="input-nascimento">Data de Nascimento:</label><br>
+        <input type="date" id="input-nascimento" onchange="
+            const txt = document.querySelector('#nascimento textarea');
+            txt.value = this.value;
+            txt.dispatchEvent(new Event('input', { bubbles: true }));
+        ">
+        """)
+
+        # Campo oculto que receberá o valor real
+        nascimento = gr.Textbox(elem_id="nascimento", visible=False)
+
         cpf_estudante = gr.Text(label="CPF (000.000.000-00)*", placeholder="Ex: 123.456.789-00")
         rg = gr.Text(label="RG*")
 
@@ -396,7 +422,7 @@ Este **TERMO** terá vigência conforme descrito na tabela abaixo, podendo ser r
          # Inputs de data visuais (com calendário)
        # Inputs de data visuais (com calendário)
         gr.HTML("""
-        <label for="inicio">Data de Início:</label><br>
+        <label for="input-inicio">Data de Início:</label><br>
         <input type="date" id="input-inicio" onchange="
             const txt = document.querySelector('#data_inicio textarea');
             txt.value = this.value;
@@ -404,7 +430,7 @@ Este **TERMO** terá vigência conforme descrito na tabela abaixo, podendo ser r
         ">
         """)
         gr.HTML("""
-        <label for="termino">Data de Término:</label><br>
+        <label for="input-termino">Data de Término:</label><br>
         <input type="date" id="input-termino" onchange="
             const txt = document.querySelector('#data_termino textarea');
             txt.value = this.value;
@@ -515,7 +541,23 @@ Este **TERMO** terá vigência conforme descrito na tabela abaixo, podendo ser r
         modalidade_estagio = gr.Radio(
             label="Modalidade do Estágio*",
             choices=["Curricular Obrigatório", "Não Obrigatório"],
-            value=None
+            value=None,
+            interactive=False  # impede edição direta pelo usuário
+        )
+
+        # Função que sincroniza os valores
+        def atualizar_modalidade(tipo):
+            if tipo == "CURRICULAR OBRIGATÓRIO":
+                return gr.update(value="Curricular Obrigatório")
+            elif tipo == "NÃO OBRIGATÓRIO":
+                return gr.update(value="Não Obrigatório")
+            return gr.update(value=None)
+
+        # Conectar alteração do tipo ao campo modalidade
+        tipo_estagio.change(
+            fn=atualizar_modalidade,
+            inputs=[tipo_estagio],
+            outputs=[modalidade_estagio]
         )
 
         remunerado = gr.Radio(
@@ -634,7 +676,6 @@ Este **TERMO** terá vigência conforme descrito na tabela abaixo, podendo ser r
 
 
 import os
-
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
     demo.queue().launch(server_name="0.0.0.0", server_port=port)
