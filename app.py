@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[6]:
+# In[8]:
 
 
 import gradio as gr
@@ -369,7 +369,7 @@ with gr.Blocks(theme="default") as demo:
     with gr.Row():
         # Campo visual com seletor de data
         gr.HTML("""
-        <label for="input-nascimento">Data de Nascimento:</label><br>
+        <label for="input-nascimento">Data de Nascimento (use o seletor abaixo)*</label><br>
         <input type="date" id="input-nascimento" onchange="
             const txt = document.querySelector('#nascimento textarea');
             txt.value = this.value;
@@ -449,7 +449,7 @@ Este **TERMO** terá vigência conforme descrito na tabela abaixo, podendo ser r
          # Inputs de data visuais (com calendário)
        # Inputs de data visuais (com calendário)
         gr.HTML("""
-        <label for="input-inicio">Data de Início:</label><br>
+        <label for="input-inicio">Data de Início (use o seletor abaixo)*</label><br>
         <input type="date" id="input-inicio" onchange="
             const txt = document.querySelector('#data_inicio textarea');
             txt.value = this.value;
@@ -457,7 +457,7 @@ Este **TERMO** terá vigência conforme descrito na tabela abaixo, podendo ser r
         ">
         """)
         gr.HTML("""
-        <label for="input-termino">Data de Término:</label><br>
+        <label for="input-termino">Data de Término (use o seletor abaixo)*</label><br>
         <input type="date" id="input-termino" onchange="
             const txt = document.querySelector('#data_termino textarea');
             txt.value = this.value;
@@ -708,10 +708,6 @@ Este **TERMO** terá vigência conforme descrito na tabela abaixo, podendo ser r
     )
 
 
-import os
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 7860))
-    demo.queue().launch(server_name="0.0.0.0", server_port=port)
 
 
 # In[ ]:
@@ -719,3 +715,8 @@ if __name__ == "__main__":
 
 
 
+
+import os
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 7860))
+    demo.queue().launch(server_name="0.0.0.0", server_port=port)
