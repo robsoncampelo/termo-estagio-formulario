@@ -1,11 +1,38 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[1]:
+# In[6]:
 
 
 import gradio as gr
 from datetime import datetime
+from num2words import num2words
+import re
+
+def converter_valor(valor_str):
+    try:
+        # Remove 'R$', espaços e outros caracteres não numéricos, exceto vírgula e ponto
+        valor_str = re.sub(r"[^\d,\.]", "", valor_str)
+        valor_str = valor_str.replace(",", ".").strip()
+        valor_float = float(valor_str)
+
+        # Separa parte inteira (reais) e decimal (centavos)
+        reais = int(valor_float)
+        centavos = round((valor_float - reais) * 100)
+
+        partes = []
+
+        if reais > 0:
+            partes.append(num2words(reais, lang='pt_BR') + (" real" if reais == 1 else " reais"))
+        if centavos > 0:
+            partes.append(num2words(centavos, lang='pt_BR') + (" centavo" if centavos == 1 else " centavos"))
+
+        if not partes:
+            return "Zero real"
+
+        return " e ".join(partes).capitalize()
+    except:
+        return ""
 
 def calcular_total_dias(data_inicio, data_termino):
     # Verifica se os campos estão preenchidos
@@ -573,7 +600,13 @@ Este **TERMO** terá vigência conforme descrito na tabela abaixo, podendo ser r
 
         valor_extenso = gr.Text(
             label="Valor da remuneração por extenso*", 
-            placeholder="Ex: Quinhentos reais"
+            interactive=False
+        )
+
+        valor_bolsa.change(
+            converter_valor, 
+            inputs=valor_bolsa, 
+            outputs=valor_extenso
         )
 
         auxilio_transporte = gr.Radio(
