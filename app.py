@@ -420,7 +420,7 @@ with gr.Blocks(theme="default") as demo:
     )
 
     with gr.Row():
-        ano_periodo = gr.Text(label="Ano/Período (aaaa/0)*", placeholder="Ex: 2025/1")
+        ano_periodo = gr.Text(label="Ano/Período do Curso*", placeholder="Ex: 8º")
         matricula = gr.Text(label="Número de Matrícula*")
 
     orientador = gr.Text(label="Professor(a) orientador(a)*")
