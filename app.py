@@ -10,6 +10,36 @@ import dns.resolver
 import gradio as gr
 
 
+def validar_cep(valor: str):
+    """
+    Valida CEP brasileiro localmente (sem API).
+    - Aceita entrada com/sem hífen e outros separadores.
+    - Exige 8 dígitos numéricos.
+    - Rejeita 00000-000.
+    - Devolve formatado como 00000-000.
+    - Integra com CSS .erro (já existente no app).
+    """
+    if not valor:  # campo vazio: não marca erro aqui (obrigatoriedade é na submissão)
+        return gr.update(value="", elem_classes=[])
+
+    # Mantém só dígitos
+    cep = re.sub(r"\D", "", str(valor))
+
+    # 8 dígitos?
+    if len(cep) != 8:
+        gr.Warning("⚠️ CEP inválido. Use o formato 00000-000.")
+        return gr.update(value="", elem_classes=["erro"])
+
+    # Evita CEP nulo
+    if cep == "00000000":
+        gr.Warning("⚠️ CEP inválido.")
+        return gr.update(value="", elem_classes=["erro"])
+
+    # Formata
+    cep_fmt = f"{cep[:5]}-{cep[5:]}"
+    return gr.update(value=cep_fmt, elem_classes=[])
+
+
 # Resolver com DNS públicos e timeouts curtos
 def _make_resolver():
     r = dns.resolver.Resolver(configure=True)
@@ -690,8 +720,11 @@ with gr.Blocks(theme="default") as demo:
         endereco = gr.Text(label="Endereço*")
         bairro = gr.Text(label="Bairro*")
         cep = gr.Text(label="CEP (00000-000)*", placeholder="Ex: 12345-000")
+        
     
-    
+    # Concedente
+    cep.blur(validar_cep, inputs=cep, outputs=cep)
+
     UF_OPCOES = [
         "AC","AL","AM","AP","BA","CE","DF","ES","GO","MA",
         "MG","MS","MT","PA","PB","PE","PI","PR","RJ","RN",
@@ -766,6 +799,9 @@ with gr.Blocks(theme="default") as demo:
         endereco_estudante = gr.Text(label="Endereço*")
         bairro_estudante = gr.Text(label="Bairro*")
         cep_estudante = gr.Text(label="CEP (00000-000)*", placeholder="Ex: 12345-000")
+    
+    # Estudante
+    cep_estudante.blur(validar_cep, inputs=cep_estudante, outputs=cep_estudante)
     
     with gr.Row():
         complemento_estudante = gr.Text(label="Complemento")
@@ -1232,7 +1268,6 @@ with gr.Blocks(theme="default") as demo:
             nome_supervisor, formacao_supervisor, cargo_supervisor, registro_conselho
         ]
     )
-
 
 
 import os
