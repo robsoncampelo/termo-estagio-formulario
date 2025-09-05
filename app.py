@@ -636,6 +636,30 @@ def processar_formulario(*args):
     
 
 with gr.Blocks(theme="default") as demo:
+    gr.HTML("""
+    <script>
+    (function () {
+      try {
+        // Diz explicitamente que a página está em pt-BR
+        document.documentElement.setAttribute("lang", "pt-BR");
+        // Sinaliza a tradutores que não queremos tradução automática
+        document.documentElement.setAttribute("translate", "no");
+        document.documentElement.classList.add("notranslate");
+
+        // Dica para o Google Translate
+        var m = document.createElement("meta");
+        m.setAttribute("name", "google");
+        m.setAttribute("content", "notranslate");
+        document.head.appendChild(m);
+      } catch (e) {}
+    })();
+    </script>
+    <style>
+      /* Evita que engines que respeitam a propriedade CSS traduzam o conteúdo */
+      .notranslate, .notranslate * { translate: none; }
+    </style>
+    """)
+    
     # CSS de erro (uma vez na app)
     gr.HTML("""
         <style>
@@ -665,14 +689,7 @@ with gr.Blocks(theme="default") as demo:
         }
         </style>
         """)
-    
-    gr.HTML("""
-        <style>
-        /* Sinaliza ao Google Translate para não mexer nesses elementos */
-        .notranslate, .notranslate * { translate: none; } /* inibe tradutores */
-        </style>
-        """)
-    
+     
      # CSS anti-erro (se já não tiver)
     gr.HTML("""
     <style>
