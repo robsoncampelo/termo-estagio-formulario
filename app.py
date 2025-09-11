@@ -1,14 +1,60 @@
 import gradio as gr
 from datetime import datetime
 from num2words import num2words
-import re
+import re, time, httpx, unicodedata
 # gradio==5.34.2
 # num2words==0.5.14
 
 from email_validator import validate_email, EmailNotValidError
 import dns.resolver
-import gradio as gr
 
+UF_OPCOES = [
+    "AC","AL","AM","AP","BA","CE","DF","ES","GO","MA",
+    "MG","MS","MT","PA","PB","PE","PI","PR","RJ","RN",
+    "RO","RR","RS","SC","SE","SP","TO"
+]
+UF_OPCOES_SET = set(UF_OPCOES)  # membership rápido
+
+
+VIACEP_URL = "https://viacep.com.br/ws/{cep}/json/"
+CEP_TIMEOUT = 4.0    # segundos
+CEP_TTL = 3600       # 1h de cache simples em memória
+__cep_cache = {}     # cep8 -> (ts, data|None)
+
+def _only_digits(s: str) -> str:
+    return re.sub(r"\D", "", s or "")
+
+def _cep8(raw: str) -> str:
+    return _only_digits(raw)[:8]
+
+def _cep_fmt(d: str) -> str:
+    return f"{d[:5]}-{d[5:]}" if len(d) == 8 else d
+
+def _cache_get(cep8): 
+    hit = __cep_cache.get(cep8)
+    if not hit: return None
+    ts, data = hit
+    if time.time() - ts > CEP_TTL:
+        __cep_cache.pop(cep8, None)
+        return None
+    return data
+
+def _cache_set(cep8, data):
+    __cep_cache[cep8] = (time.time(), data)
+
+def viacep_lookup(cep8: str):
+    c = _cache_get(cep8)
+    if c is not None:
+        return c
+    with httpx.Client(timeout=CEP_TIMEOUT) as client:
+        r = client.get(VIACEP_URL.format(cep=cep8))
+        r.raise_for_status()
+        data = r.json()
+        if data.get("erro"):
+            _cache_set(cep8, None)
+            return None
+        _cache_set(cep8, data)
+        return data
 
 def validar_cep(valor: str):
     """
@@ -39,6 +85,324 @@ def validar_cep(valor: str):
     cep_fmt = f"{cep[:5]}-{cep[5:]}"
     return gr.update(value=cep_fmt, elem_classes=[])
 
+def validar_cep_com_api(cep_val, end_val, bairro_val, cidade_val, uf_val):
+    # 1) validação local (sua função atual)
+    upd_local = validar_cep(cep_val)  # gr.update(...)
+    cep_fmt = upd_local.get("value") or ""
+    cep_ok = bool(cep_fmt) and (upd_local.get("elem_classes") in ([], None))
+
+    # base: refletir resultado local
+    out = [
+        upd_local,
+        gr.update(value=end_val or ""),     # endereço
+        gr.update(value=bairro_val or ""),  # bairro
+        gr.update(value=cidade_val or ""),  # cidade
+        gr.update(value=uf_val or None),    # uf (dropdown)
+    ]
+    if not cep_ok:
+        return tuple(out)
+
+    # 2) CEP local ok → consulta ViaCEP
+    d = re.sub(r"\D", "", cep_fmt)[:8]
+    try:
+        info = viacep_lookup(d)
+    except Exception:
+        gr.Warning("⚠️ Falha ao consultar o ViaCEP agora. Tente novamente.")
+        return tuple(out)
+
+    if not info:
+        gr.Warning("⚠️ CEP não encontrado na base ViaCEP.")
+        out[0] = gr.update(value=cep_fmt, elem_classes=["erro"])
+        return tuple(out)
+
+    # 3) sucesso: extrair campos
+    end_api    = (info.get("logradouro")  or "").strip()
+    bairro_api = (info.get("bairro")      or "").strip()
+    cidade_api = (info.get("localidade")  or "").strip()
+    uf_api     = (info.get("uf")          or "").strip().upper() or None
+
+    # helper: manter o que o usuário pôs; senão, preencher com API
+    def keep_or_fill(cur, api):
+        return cur if (cur or "").strip() else (api or "")
+
+    # 4) aplicar política
+    # CEP: ok
+    out[0] = gr.update(value=cep_fmt, elem_classes=[])
+
+    # Endereço/Bairro: só preenche se estiverem vazios; não inventa quando API vier vazia
+    novo_end    = keep_or_fill(end_val,    end_api)
+    novo_bairro = keep_or_fill(bairro_val, bairro_api)
+    out[1] = gr.update(value=novo_end,    elem_classes=[])
+    out[2] = gr.update(value=novo_bairro, elem_classes=[])
+
+    # Cidade/UF: SEMPRE sobrescrever pelos dados da API (mais confiáveis)
+    out[3] = gr.update(value=cidade_api, elem_classes=[])
+
+    # UF: garantir que existe nas opções do dropdown
+    if uf_api in UF_OPCOES:
+        out[4] = gr.update(value=uf_api, elem_classes=[])
+    else:
+        # se a API não trouxe UF válida, não force valor (mantém como está)
+        out[4] = gr.update(value=(uf_val or None), elem_classes=[])
+
+    # 5) CEP genérico de município (logradouro/bairro vazios): orientar usuário
+    if not novo_end or not novo_bairro:
+        gr.Info("ℹ️ CEP genérico do município: preencha manualmente Endereço e Bairro.")
+
+    return tuple(out)
+
+AUTO_CORRIGIR_CIDADE_UF = True  # defina False se quiser apenas marcar erro e interromper
+
+def _norm(x: str) -> str:
+    x = (x or "").strip().lower()
+    x = unicodedata.normalize("NFD", x)
+    x = "".join(ch for ch in x if unicodedata.category(ch) != "Mn")
+    x = re.sub(r"\s+", " ", x)
+    return x
+
+def validar_cidade_uf_por_cep(dados: dict, updates: dict, nomes_completos: list, prefixo: str, UF_OPCOES=None):
+    """Valida se cidade/UF batem com ViaCEP para o CEP. prefixo "" ou 'estudante'."""
+    def nome(c): return f"{c}_{prefixo}" if prefixo else c
+    def idx(n): return nomes_completos.index(n)
+
+    n_cep, n_cidade, n_uf = nome("cep"), nome("cidade"), nome("uf")
+
+    cep_raw = (dados.get(n_cep) or "").strip()
+    cep8 = re.sub(r"\D", "", cep_raw)[:8]
+    if len(cep8) != 8 or cep8 == "00000000":
+        updates[idx(n_cep)] = gr.update(elem_classes=["erro"])
+        gr.Warning(f"⚠️ CEP inválido em '{n_cep}'.")
+        return False
+
+    try:
+        info = viacep_lookup(cep8)
+    except Exception:
+        updates[idx(n_cep)] = gr.update(elem_classes=["erro"])
+        gr.Warning(f"⚠️ Não foi possível validar {n_cep} agora. Tente novamente.")
+        return False
+
+    if not info:
+        updates[idx(n_cep)] = gr.update(elem_classes=["erro"])
+        gr.Warning(f"⚠️ {n_cep} não encontrado (ViaCEP).")
+        return False
+
+    cidade_api = (info.get("localidade") or "").strip()
+    uf_api     = (info.get("uf") or "").strip().upper()
+
+    cidade_user = (dados.get(n_cidade) or "").strip()
+    uf_user     = (dados.get(n_uf) or "").strip().upper()
+
+    ok_cidade = _norm(cidade_user) == _norm(cidade_api) if cidade_api else True
+    ok_uf     = (uf_user == uf_api) if uf_api else True
+
+    # padroniza CEP
+    updates[idx(n_cep)] = gr.update(value=f"{cep8[:5]}-{cep8[5:]}", elem_classes=[])
+
+    if ok_cidade and ok_uf:
+        return True
+
+    # Divergência → corrigir ou marcar erro
+    msgs = []
+    if not ok_cidade:
+        msgs.append(f"cidade = '{cidade_api}'")
+        updates[idx(n_cidade)] = (
+            gr.update(value=cidade_api, elem_classes=[]) if AUTO_CORRIGIR_CIDADE_UF
+            else gr.update(elem_classes=["erro"])
+        )
+    if not ok_uf:
+        msgs.append(f"UF = '{uf_api}'")
+        if UF_OPCOES is None or (uf_api in UF_OPCOES_SET):
+            updates[idx(n_uf)] = (
+                gr.update(value=uf_api, elem_classes=[]) if AUTO_CORRIGIR_CIDADE_UF
+                else gr.update(elem_classes=["erro"])
+            )
+        else:
+            updates[idx(n_uf)] = gr.update(elem_classes=["erro"])
+
+
+    gr.Warning("⚠️ Cidade/UF não conferem com o CEP. Valor esperado: " + ", ".join(msgs) + ".")
+    return AUTO_CORRIGIR_CIDADE_UF
+
+AUTO_CORRIGIR_CIDADE_UF_NO_BLUR = False  # mantemos só sinalização, sem autocorrigir
+
+def validar_cidade_uf_blur(cep_val, cidade_val, uf_val):
+    """
+    Valida no blur de CIDADE ou UF:
+    - Compara (cidade/uf) informados com ViaCEP do CEP.
+    - Se só a cidade divergir -> limpa/erro APENAS a cidade.
+    - Se só a UF divergir     -> limpa/erro APENAS a UF.
+    - Se ambos divergirem     -> limpa/erro ambos.
+    - Se baterem               -> remove erros.
+    - Se CEP inválido/sem API  -> não altera nada.
+    Retorna: (update_cidade, update_uf)
+    """
+    # 0) precisa de CEP válido
+    cep8 = re.sub(r"\D", "", (cep_val or ""))[:8]
+    if len(cep8) != 8 or cep8 == "00000000":
+        return (
+            gr.update(value=(cidade_val or ""), elem_classes=[]),
+            gr.update(value=(uf_val or None),  elem_classes=[]),
+        )
+
+    # 1) ViaCEP
+    try:
+        info = viacep_lookup(cep8)
+    except Exception:
+        gr.Warning("⚠️ Não foi possível validar cidade/UF agora (rede).")
+        return (
+            gr.update(value=(cidade_val or ""), elem_classes=[]),
+            gr.update(value=(uf_val or None),  elem_classes=[]),
+        )
+    if not info:
+        gr.Warning("⚠️ CEP não encontrado na base ViaCEP; não é possível validar cidade/UF.")
+        return (
+            gr.update(value=(cidade_val or ""), elem_classes=[]),
+            gr.update(value=(uf_val or None),  elem_classes=[]),
+        )
+
+    # 2) compara
+    cidade_api = (info.get("localidade") or "").strip()
+    uf_api     = (info.get("uf") or "").strip().upper()
+
+    def _norm(x: str) -> str:
+        import unicodedata, re as _re
+        x = (x or "").strip().lower()
+        x = unicodedata.normalize("NFD", x)
+        return _re.sub(r"\s+", " ", "".join(ch for ch in x if unicodedata.category(ch) != "Mn"))
+
+    uf_user   = (str(uf_val or "")).upper()
+    ok_cidade = _norm(cidade_val) == _norm(cidade_api) if cidade_api else True
+    ok_uf     = (uf_user == uf_api) if uf_api else True
+
+    # 3) construir updates por campo, limpando somente o que divergiu
+    updates_cidade = gr.update(value=(cidade_val or ""), elem_classes=[])
+    updates_uf     = gr.update(value=(uf_val or None),  elem_classes=[])
+
+    msgs = []
+    if not ok_cidade:
+        updates_cidade = gr.update(value="", elem_classes=["erro"])   # limpa SÓ cidade
+        msgs.append(f"cidade = '{cidade_api}'")
+    if not ok_uf:
+        updates_uf = gr.update(value=None, elem_classes=["erro"])     # limpa SÓ UF (dropdown)
+        msgs.append(f"UF = '{uf_api}'")
+
+    if msgs:
+        gr.Warning("⚠️ Cidade/UF não conferem com o CEP. Esperado: " + ", ".join(msgs) + ".")
+        return (updates_cidade, updates_uf)
+
+    # 4) tudo ok → remover erros e manter valores
+    return (
+        gr.update(value=(cidade_val or ""), elem_classes=[]),
+        gr.update(value=(uf_val or None),  elem_classes=[]),
+    )
+
+    
+def rg_normalizar(raw: str) -> str:
+    # remove tudo que não for dígito ou X/x
+    import re
+    v = re.sub(r"[^0-9Xx]", "", raw or "").upper()
+    if "X" in v[:-1]:  # X só pode ser no final
+        return v  # inválido, deixo a validação tratar
+    return v
+
+def rg_valido(br_rg: str) -> bool:
+    v = rg_normalizar(br_rg)
+    if not v:
+        return False
+    if "X" in v[:-1]:
+        return False
+    corpo = v[:-1] if v[-1] == "X" else v
+    if not corpo.isdigit():
+        return False
+    return 7 <= len(v) <= 10
+
+def rg_formatar(br_rg: str) -> str:
+    v = rg_normalizar(br_rg)
+    if not v:
+        return ""
+    dv = v[-1] if v[-1] == "X" else v[-1]
+    corpo = v[:-1] if v[-1] in "X0123456789" else v
+    if corpo.isdigit():
+        if len(v) == 9:   # 8+DV
+            return f"{corpo[:2]}.{corpo[2:5]}.{corpo[5:8]}-{dv}"
+        if len(v) == 8:   # 7+DV
+            return f"{corpo[:1]}.{corpo[1:4]}.{corpo[4:7]}-{dv}"
+    return v  # fallback sem máscara
+
+
+# toggle de comportamento (se quiser voltar a autoformatar no futuro)
+PRESERVAR_PONTUACAO_RG = True
+
+def validar_rg_front(valor: str):
+    raw = (valor or "").strip()
+    if not raw:
+        return gr.update(value="", elem_classes=[])
+
+    # usa rg_valido(raw) que valida pelo "normalizado", ignorando pontuação
+    if rg_valido(raw):
+        # mantém exatamente como o usuário digitou (só tira espaços nas pontas)
+        if PRESERVAR_PONTUACAO_RG:
+            return gr.update(value=raw, elem_classes=[])
+        # opcional: se desligar o toggle, volta a aplicar máscara padrão
+        return gr.update(value=rg_formatar(raw), elem_classes=[])
+
+    gr.Warning("⚠️ RG inválido. Use apenas dígitos e, se houver, 'X' no final. Ex.: 12.345.678-9")
+    return gr.update(value="", elem_classes=["erro"])
+
+
+def _so_digitos(s: str) -> str:
+    return re.sub(r"\D", "", s or "")
+
+def telefone_valido_br(dig: str) -> bool:
+    """
+    Regras (Brasil):
+    - Aceita DDD + número: 10 dígitos (fixo) ou 11 dígitos (celular).
+    - Permite prefixo +55 (12 ou 13 dígitos com o 55; removemos antes de validar).
+    """
+    d = _so_digitos(dig)
+
+    # se começa com 55
+    if d.startswith("55"):
+        # precisa ter 12 (55 + 10 fixo) ou 13 (55 + 11 celular)
+        if len(d) in (12, 13):
+            d = d[2:]
+        else:
+            return False  # já corta aqui
+
+    # fixo: 10 dígitos
+    if len(d) == 10 and d[0] != "0":
+        return True
+    # celular: 11 dígitos, terceiro dígito = 9
+    if len(d) == 11 and d[0] != "0" and d[2] == "9":
+        return True
+
+    return False
+
+def formatar_telefone_br(dig: str) -> str:
+    d = _so_digitos(dig)
+    if d.startswith("55") and len(d) in (12, 13):
+        d = d[2:]
+    if len(d) == 10:  # fixo
+        return f"({d[:2]}) {d[2:6]}-{d[6:]}"
+    if len(d) == 11:  # celular
+        return f"({d[:2]}) {d[2:7]}-{d[7:]}"
+    return dig  # fallback
+
+def validar_telefone(valor: str):
+    """
+    Para blur/change nos inputs.
+    - Se válido → normaliza e formata.
+    - Se inválido → limpa o campo e aplica .erro.
+    """
+    raw = (valor or "").strip()
+    if not raw:
+        return gr.update(value="", elem_classes=[])
+
+    if telefone_valido_br(raw):
+        return gr.update(value=formatar_telefone_br(raw), elem_classes=[])
+
+    gr.Warning("⚠️ Telefone inválido. Use DDD + número, ex.: (64) 91234-5678.")
+    return gr.update(value="", elem_classes=["erro"])
 
 # Resolver com DNS públicos e timeouts curtos
 def _make_resolver():
@@ -337,22 +701,6 @@ def processar_formulario(*args):
     # ...
     atividades = [dados[n] for n in nomes_completos if n.startswith("atividade_")]
 
-
-    # Lista de índices obrigatórios
-#     indices_obrigatorios = [
-#         0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11,           # empresa
-#         12, 13, 14, 15, 16, 17, 18, 19, 20,          # estudante
-#         22, 23, 24, 25, 26,                          # estudante continuação
-#         27, 28, 29,                                  # acadêmicos
-#         30, 31, 32,                                  # datas
-#         33, 34, 35,                                  # horários
-#         36, 37,                                      # seguradora, apólice
-#         38, 39, 40, 41,                              # remuneração
-#         42, 44,                                      # auxilio e contraprestação
-#         46, 47, 48, 49,                              # plano de atividades
-#         61, 62                                       # nome_supervisor, formacao_supervisor
-#     ]
-
     campos_obrigatorios = {
         "tipo_estagio": "Tipo de Estágio",
         "razao_social": "Razão Social",
@@ -402,28 +750,7 @@ def processar_formulario(*args):
         "cargo_supervisor": "Cargo/Função do(a) Supervisor(a) no(a) concedente",
         "formacao_supervisor": "Formação do(a) Supervisor(a)"
     }
-    
-
-    # Desempacotamento
-#     (
-#         tipo_estagio, razao_social, cnpj, nome_fantasia, endereco, bairro,
-#         cep, complemento, cidade, uf, email, telefone,
-#         representante, cpf_repr, nome_estudante, nascimento, cpf_estudante, rg,
-#         endereco_estudante, bairro_estudante, cep_estudante, complemento_estudante,
-#         cidade_estudante, uf_estudante, email_estudante, telefone_estudante, curso_estudante,
-#         ano_periodo, matricula, orientador, data_inicio, data_termino, total_dias,
-#         horas_diarias, horas_semana_estagio, total_horas_estagio,
-#         seguradora, apolice,
-#         modalidade_estagio, remunerado, valor_bolsa, valor_extenso,
-#         auxilio_transporte, especificacao_auxilio,
-#         contraprestacao, especificacao_contraprestacao,
-#         horas_diarias_plano, horas_semanais_plano, total_horas_plano,
-#         horario_atividades,
-#         atividade_1, atividade_2, atividade_3, atividade_4, atividade_5,
-#         atividade_6, atividade_7, atividade_8, atividade_9, atividade_10,
-#         nome_supervisor, formacao_supervisor, cargo_supervisor, registro_conselho
-#     ) = args
-    
+     
     
     # Validação de obrigatórios (realça apenas os que faltam e preserva os demais)
     # --- PREPARE: lista de updates + helper de marcação ---
@@ -471,6 +798,22 @@ def processar_formulario(*args):
             gr.Warning("⚠️ O campo 'Especificação da Contraprestação' é obrigatório para a opção Sim.")
             return updates
     marcar_erro("especificacao_contraprestacao", False)
+    
+    # ... (depois de montar dados/updates/nomes_completos)
+
+    # valida coerência cidade/UF com CEP — concedente
+    ok_concedente = validar_cidade_uf_por_cep(
+        dados, updates, nomes_completos, prefixo="", UF_OPCOES=UF_OPCOES_SET
+    )
+    if not ok_concedente:
+        return updates
+
+    # valida coerência cidade/UF com CEP — estudante
+    ok_estudante = validar_cidade_uf_por_cep(
+        dados, updates, nomes_completos, prefixo="estudante", UF_OPCOES=UF_OPCOES_SET
+    )
+    if not ok_estudante:
+        return updates
 
     # =========================
     # 2) Obrigatórios gerais
@@ -545,17 +888,33 @@ def processar_formulario(*args):
     # =========================
     # 4) Atividades (mínimo 5) com borda vermelha
     # =========================
-    indices_atividades = [nomes_completos.index(f"atividade_{i}") for i in range(1, 11)]
-    valores_atividades = [(i, (str(args[i]).strip() if args[i] is not None else "")) for i in indices_atividades]
+    indices_atividades = [
+        nomes_completos.index(f"atividade_{i}")
+        for i in range(1, n_atividades + 1)
+    ]
+    # valores normalizados
+    valores_atividades = [
+        (i, (str(args[i]).strip() if args[i] is not None else ""))
+        for i in indices_atividades
+    ]
 
     preenchidas = [(i, v) for (i, v) in valores_atividades if v]
-    vazias      = [i for (i, v) in valores_atividades if not v]
+    vazias = [i for (i, v) in valores_atividades if not v]
 
-    if len(preenchidas) < 5:
-        faltam = 5 - len(preenchidas)
-        for i in vazias[:faltam]:
-            updates[i] = gr.update(value=args[i], elem_classes=["erro"])
-        gr.Warning(f"⚠️ Informe pelo menos 5 atividades (faltam {faltam}).")
+   # 1) zere as classes de TODAS as atividades visíveis (remove vermelho antigo)
+    for idx in indices_atividades:
+        updates[idx] = gr.update(value=args[idx], elem_classes=[])
+
+    # 2) regra do mínimo
+    MIN_REQ = 5
+    if len(preenchidas) < MIN_REQ:
+        faltam = MIN_REQ - len(preenchidas)
+
+        # marque de vermelho apenas as primeiras 'faltam' vazias
+        for idx in vazias[:faltam]:
+            updates[idx] = gr.update(value=args[idx], elem_classes=["erro"])
+
+        gr.Warning(f"⚠️ Informe pelo menos {MIN_REQ} atividades (faltam {faltam}).")
         return updates
 
     # ------------------------------
@@ -699,6 +1058,16 @@ with gr.Blocks(theme="default") as demo:
     </style>
     """)
     
+    gr.HTML("""
+    <script>
+      try {
+        history.scrollRestoration = 'manual';
+        window.addEventListener('DOMContentLoaded', ()=>{ window.scrollTo(0,0); });
+        setTimeout(()=>{ window.scrollTo(0,0); }, 0);
+      } catch(e){}
+    </script>
+    """)
+
     gr.Markdown("<h2 style='text-align: center;'>TERMO DE COMPROMISSO DE ESTÁGIO</h2>")
     
     gr.Markdown("(*) Preenchimento obrigatório")
@@ -739,9 +1108,6 @@ with gr.Blocks(theme="default") as demo:
         cep = gr.Text(label="CEP (00000-000)*", placeholder="Ex: 12345-000")
         
     
-    # Concedente
-    cep.blur(validar_cep, inputs=cep, outputs=cep)
-
     UF_OPCOES = [
         "AC","AL","AM","AP","BA","CE","DF","ES","GO","MA",
         "MG","MS","MT","PA","PB","PE","PI","PR","RJ","RN",
@@ -768,11 +1134,27 @@ with gr.Blocks(theme="default") as demo:
             elem_classes=["notranslate"]
         )
     
-    uf.blur(validar_uf, inputs=uf, outputs=uf)
+    uf.blur(validar_uf, inputs=uf, outputs=uf)  # 1º: valida a sigla
+    uf.blur(                                     # 2º: cruza com CEP/Cidade
+        validar_cidade_uf_blur,
+        inputs=[cep, cidade, uf],
+        outputs=[cidade, uf]
+    )
+    cidade.blur(validar_cidade_uf_blur, inputs=[cep, cidade, uf], outputs=[cidade, uf])
+    
+    # Concedente
+    #cep.blur(validar_cep, inputs=cep, outputs=cep)
+    cep.blur(
+        validar_cep_com_api,
+        inputs=[cep, endereco, bairro, cidade, uf],
+        outputs=[cep, endereco, bairro, cidade, uf]
+    )
     
     with gr.Row():
         email = gr.Textbox(label="E-mail*", placeholder="exemplo@dominio.com")
         telefone = gr.Text(label="Telefone (00) 00000-0000*", placeholder="Ex: (64) 91234-5678")
+    
+    telefone.blur(validar_telefone, inputs=telefone, outputs=telefone)
     
     email.blur(validar_email_estrito, inputs=email, outputs=email)
 
@@ -809,6 +1191,8 @@ with gr.Blocks(theme="default") as demo:
 
         rg = gr.Text(label="RG*")
     
+    rg.blur(validar_rg_front, inputs=rg, outputs=rg)
+    
     # valida ao sair do campo (estudante) — reutiliza a MESMA função
     cpf_estudante.blur(validar_cpf, inputs=cpf_estudante, outputs=cpf_estudante)
         
@@ -816,10 +1200,7 @@ with gr.Blocks(theme="default") as demo:
         endereco_estudante = gr.Text(label="Endereço*")
         bairro_estudante = gr.Text(label="Bairro*")
         cep_estudante = gr.Text(label="CEP (00000-000)*", placeholder="Ex: 12345-000")
-    
-    # Estudante
-    cep_estudante.blur(validar_cep, inputs=cep_estudante, outputs=cep_estudante)
-    
+     
     with gr.Row():
         complemento_estudante = gr.Text(label="Complemento")
         cidade_estudante = gr.Text(label="Cidade*")
@@ -833,13 +1214,45 @@ with gr.Blocks(theme="default") as demo:
         )
     
     uf_estudante.blur(validar_uf, inputs=uf_estudante, outputs=uf_estudante)
+    uf_estudante.blur(
+        validar_cidade_uf_blur,
+        inputs=[cep_estudante, cidade_estudante, uf_estudante],
+        outputs=[cidade_estudante, uf_estudante]
+    )
+
+    # Estudante
+    #cep_estudante.blur(validar_cep, inputs=cep_estudante, outputs=cep_estudante)
+    cep_estudante.blur(
+        validar_cep_com_api,
+        inputs=[cep_estudante, endereco_estudante, bairro_estudante, cidade_estudante, uf_estudante],
+        outputs=[cep_estudante, endereco_estudante, bairro_estudante, cidade_estudante, uf_estudante]
+    )
+    
+    cidade_estudante.blur(validar_cidade_uf_blur, inputs=[cep_estudante, cidade_estudante, uf_estudante],\
+                          outputs=[cidade_estudante, uf_estudante])
+    
     
     with gr.Row():
         email_estudante = gr.Textbox(label="E-mail do Estudante*", placeholder="exemplo@dominio.com")
         telefone_estudante = gr.Text(label="Telefone (00) 00000-0000)*", placeholder="Ex: (64) 91234-5678")
     
+    telefone_estudante.blur(validar_telefone, inputs=telefone_estudante, outputs=telefone_estudante)
+    
     email_estudante.blur(validar_email_estrito, inputs=email_estudante, outputs=email_estudante)
     
+    def limpar_erro(valor):
+        # só limpa erro se o usuário digitou/selecionou algo não vazio
+        if (valor or "").strip():
+            return gr.update(elem_classes=[])
+        # se ficou vazio, mantenha o estado atual (não remova o vermelho)
+        return gr.update()
+    
+    cidade.change(limpar_erro, inputs=cidade, outputs=cidade)
+    cidade_estudante.change(limpar_erro, inputs=cidade_estudante, outputs=cidade_estudante)
+    # para UF, geralmente dá para não usar change:
+    # uf.change(limpar_erro, inputs=uf, outputs=uf)
+    # uf_estudante.change(limpar_erro, inputs=uf_estudante, outputs=uf_estudante)
+
     CURSO_OPCOES = [
         "Bacharelado em Administração",
         "Bacharelado em Zootecnia",
@@ -1204,6 +1617,10 @@ with gr.Blocks(theme="default") as demo:
 
     # Estado: quantas atividades estão visíveis agora
     ativ_count = gr.State(MIN_ATIVIDADES)
+    
+    def limpar_erro(valor):
+        # sempre que o usuário alterar o campo, limpamos a classe 'erro'
+        return gr.update(elem_classes=[])
 
     # Pré-cria os campos (Atividade 1..N) e deixa só as 5 primeiras visíveis
     atividades = []
@@ -1215,6 +1632,13 @@ with gr.Blocks(theme="default") as demo:
                 visible=(i <= MIN_ATIVIDADES)
             )
         )
+    
+    # após o for que cria os componentes:
+    for comp in atividades:
+        # comp.change(limpar_erro, inputs=comp, outputs=comp)
+        # se preferir limpar no desfocar em vez de a cada mudança:
+        comp.blur(limpar_erro, inputs=comp, outputs=comp)
+
 
     def add_atividade(n):
         # revela mais um até o máximo
