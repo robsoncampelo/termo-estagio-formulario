@@ -1,5 +1,5 @@
 import gradio as gr
-from datetime import datetime
+from datetime import datetime, timedelta
 from num2words import num2words
 import re, time, httpx, unicodedata
 # gradio==5.34.2
@@ -634,26 +634,46 @@ def converter_valor(valor_str):
         print(f"Erro na conversão do valor: {e}")
         return ""
 
-def calcular_total_dias(data_inicio, data_termino):
-    # Verifica se os campos estão preenchidos
+def calcular_total_dias(data_inicio, data_termino, contar_finais_semana, qtd_feriados):
     if not data_inicio or not data_termino:
         return gr.update(value="")
 
     try:
-        # Tenta converter as datas
         dt_inicio = datetime.strptime(data_inicio, "%Y-%m-%d")
         dt_termino = datetime.strptime(data_termino, "%Y-%m-%d")
-        dias = (dt_termino - dt_inicio).days
-
-        # Validação: término antes do início
-        if dias < 0:
-            gr.Warning("A data de término não pode ser anterior à data de início.")
+        if dt_termino < dt_inicio:
+            gr.Warning("⚠️ A data de término não pode ser anterior à data de início.")
             return gr.update(value="")
-
-        return f"{dias} dias"
     except ValueError:
-        # Formato inválido (ou campos incompletos)
         return gr.update(value="")
+
+    # feriados (inteiro ≥ 0)
+    try:
+        feriados = int(qtd_feriados or 0)
+        if feriados < 0:
+            feriados = 0
+    except Exception:
+        feriados = 0
+
+    # === LÓGICA AJUSTADA ===
+    # "Sim"  -> NÃO contar finais de semana (excluir sábados e domingos)
+    # "Não"  -> CONTAR finais de semana (incluir sábados e domingos)
+    conta = {0, 1, 2, 3, 4}  # seg a sex
+    if contar_finais_semana == "Não":
+        conta.update({5, 6})  # inclui sábados e domingos
+
+    # conta dias [início, término] inclusivo
+    dias = 0
+    atual = dt_inicio
+    while atual <= dt_termino:
+        if atual.weekday() in conta:
+            dias += 1
+        atual += timedelta(days=1)
+
+    dias_efetivos = max(0, dias - feriados)
+    return gr.update(value=f"{dias_efetivos} dias")
+
+
 
 # === Função principal ===
 def processar_formulario(*args):
@@ -878,9 +898,9 @@ def processar_formulario(*args):
     marcar_erro("data_termino", False)
     marcar_erro("nascimento", False)
 
-    data_inicio  = dt_inicio.strftime("%d/%m/%Y")
-    data_termino = dt_termino.strftime("%d/%m/%Y")
-    nascimento   = dt_nascimento.strftime("%d/%m/%Y")
+    dados['data_inicio']  = dt_inicio.strftime("%d/%m/%Y")
+    dados['data_termino'] = dt_termino.strftime("%d/%m/%Y")
+    dados['nascimento']   = dt_nascimento.strftime("%d/%m/%Y")
 
     # (Se você precisa dos formatos dd/mm/aaaa depois, faça a conversão aqui em variáveis locais,
     #   mas NÃO altere args; o 'updates' é só para UI)
@@ -1240,18 +1260,6 @@ with gr.Blocks(theme="default") as demo:
     
     email_estudante.blur(validar_email_estrito, inputs=email_estudante, outputs=email_estudante)
     
-    def limpar_erro(valor):
-        # só limpa erro se o usuário digitou/selecionou algo não vazio
-        if (valor or "").strip():
-            return gr.update(elem_classes=[])
-        # se ficou vazio, mantenha o estado atual (não remova o vermelho)
-        return gr.update()
-    
-    cidade.change(limpar_erro, inputs=cidade, outputs=cidade)
-    cidade_estudante.change(limpar_erro, inputs=cidade_estudante, outputs=cidade_estudante)
-    # para UF, geralmente dá para não usar change:
-    # uf.change(limpar_erro, inputs=uf, outputs=uf)
-    # uf_estudante.change(limpar_erro, inputs=uf_estudante, outputs=uf_estudante)
 
     CURSO_OPCOES = [
         "Bacharelado em Administração",
@@ -1312,18 +1320,6 @@ with gr.Blocks(theme="default") as demo:
     """, elem_classes=["notranslate"])
     
     with gr.Row():
-#         data_inicio = gr.Text(
-#             label="Data de Início (dd/mm/aaaa)",
-#             placeholder="Ex: 12/05/2025"
-#         )
-
-#         data_termino = gr.Text(
-#             label="Data de Término (dd/mm/aaaa)",
-#             placeholder="Ex: 07/07/2025"
-#         )
-       
-         # Inputs de data visuais (com calendário)
-       # Inputs de data visuais (com calendário)
         gr.HTML("""
         <label for="input-inicio">Data de Início (use o seletor abaixo)*</label><br>
         <input type="date" id="input-inicio" onchange="
@@ -1351,17 +1347,46 @@ with gr.Blocks(theme="default") as demo:
             placeholder="Ex: 40 dias",
             interactive=False
         )
-
-        # Atualiza o total de dias automaticamente
-        data_inicio.change(fn=calcular_total_dias, inputs=[data_inicio, data_termino], outputs=total_dias)
-        data_termino.change(fn=calcular_total_dias, inputs=[data_inicio, data_termino], outputs=total_dias) 
         
-#         total_dias = gr.Text(
-#             label="Total de dias previstos para estágio",
-#             placeholder="Ex: 40 dias"
-#         )
+       
+    with gr.Row():
+        contar_finais_semana = gr.Radio(
+            label="Descontar os finais de semana do período de estágio?*",
+            choices=["Sim", "Não"],
+            interactive=True,
+            value="Não"  # começa marcado em "Não"
+        )
+        qtd_feriados = gr.Number(
+            label="Quantos dias de feriados devem ser desconsiderados no período previsto para estágio?",
+            value=0,
+            precision=0,      # inteiro
+            interactive=True,
+            minimum=0
+        )
         
-
+    # Atualiza o total de dias automaticamente
+    # sempre que qualquer uma das entradas mudar, recalcule
+    data_inicio.change(
+        fn=calcular_total_dias,
+        inputs=[data_inicio, data_termino, contar_finais_semana, qtd_feriados],
+        outputs=total_dias
+    )
+    data_termino.change(
+        fn=calcular_total_dias,
+        inputs=[data_inicio, data_termino, contar_finais_semana, qtd_feriados],
+        outputs=total_dias
+    )
+    contar_finais_semana.change(
+        fn=calcular_total_dias,
+        inputs=[data_inicio, data_termino, contar_finais_semana, qtd_feriados],
+        outputs=total_dias
+    )
+    qtd_feriados.change(
+        fn=calcular_total_dias,
+        inputs=[data_inicio, data_termino, contar_finais_semana, qtd_feriados],
+        outputs=total_dias
+    )
+        
     gr.Markdown("""
         **Parágrafo único.** O Estagiário terá direito a recesso de 30 (trinta) dias, compatíveis com suas férias escolares, sempre que o estágio tenha duração igual ou superior a 1 (um) ano. Sendo proporcional o recesso, em casos de estágio inferior a 1 (um) ano.
 
@@ -1372,13 +1397,19 @@ with gr.Blocks(theme="default") as demo:
         A carga horária do Estágio será cumprida conforme apresentado na tabela abaixo, em consonância ao art. 10 da Lei nº 11.788/2008:
         """)
     
+    # gera escolhas de 1, 1,5, 2, 2,5, ... 8
+    horas_choices = [str(h/2).replace('.', ',') for h in range(2, 17)]  # 2/2=1  ... 16/2=8
+    
     with gr.Row():
         horas_diarias = gr.Radio(
-            choices=[str(i) for i in range(1, 9)],
+            choices=horas_choices,
             label="Horas diárias (marque o valor correspondente)*",
-            info="Selecione de 1 a 8 horas",
+            info="Selecione de 1 a 8 horas, em intervalos de 30 minutos",
+            value=None,
+            interactive=True,
             container=True
         )
+
         horas_semana_estagio = gr.Text(
             label="Horas semanais (máximo 40 h/s)*",
             placeholder="Ex: 30h",
@@ -1387,7 +1418,8 @@ with gr.Blocks(theme="default") as demo:
         total_horas_estagio = gr.Text(
             label="Total de horas do estágio*",
             placeholder="Ex: 240 horas",
-            value=None
+            value=None,
+            interactive=False  # ← agora é calculado automaticamente
         )
     
     # valida quando perde o foco
@@ -1529,31 +1561,25 @@ with gr.Blocks(theme="default") as demo:
     gr.Markdown("""
     ### CLÁUSULA NONA – PLANO DE ATIVIDADES DE ESTÁGIO
     """)
-    
-#     horas_diarias_plano = gr.Radio(
-#         label="Horas diárias (marque o valor correspondente)*", 
-#         choices=[str(i) for i in range(1, 9)], 
-#         type="value"
-#     )
-    
+        
     # Radio do plano (preenchido automaticamente, sem edição)
     horas_diarias_plano = gr.Radio(
         label="Horas diárias (plano)*",
-        choices=[str(i) for i in range(1, 9)],
+        choices=horas_choices,   # mesmas opções
         type="value",
         value=None,
-        interactive=False   # impede edição manual
+        interactive=False         # impede edição manual
     )
 
     # 3) Função de sincronização
+    # Sincronização (espelha exatamente o que foi escolhido na Quarta)
     def sincronizar_horas_diarias(v):
-        # Se limpar/voltar a None, apaga o espelho também
+        # se limpar, limpa o espelho também
         if not v:
             return gr.update(value=None)
-        # Garante string
+        # garante que o espelho tenha a mesma string (ex.: "1,5")
         return gr.update(value=str(v))
 
-    # 4) Liga os componentes
     horas_diarias.change(
         sincronizar_horas_diarias,
         inputs=horas_diarias,
@@ -1601,6 +1627,68 @@ with gr.Blocks(theme="default") as demo:
         )
         
         horario_atividades = gr.Text(label="Horário de realização das atividades*", placeholder="Ex: 13h às 17h30min")
+    
+   
+    def _parse_horas_diarias(txt: str):
+        """
+        Converte "1,5" -> 1.5 ; "2" -> 2.0 ; retorna None se vazio/ inválido.
+        """
+        if not txt:
+            return None
+        s = str(txt).strip().replace(',', '.')
+        try:
+            v = float(s)
+            return v if v > 0 else None
+        except Exception:
+            return None
+
+    def _parse_total_dias_label(lbl: str):
+        """
+        Converte "22 dias" -> 22 ; "1 dia" -> 1 ; "" -> None
+        Aceita números no início da string.
+        """
+        if not lbl:
+            return None
+        m = re.search(r'\d+', str(lbl))
+        if not m:
+            return None
+        try:
+            return int(m.group(0))
+        except Exception:
+            return None
+
+    def calcular_total_horas(horas_diarias_val, total_dias_label):
+        hd = _parse_horas_diarias(horas_diarias_val)
+        td = _parse_total_dias_label(total_dias_label)
+
+        if hd is None or td is None:
+            # faltando dados -> limpa
+            return gr.update(value=None)
+
+        horas = hd * td  # pode ser .0 ou .5 (porque hd é meia em meia)
+        # formatar: se inteiro, sem casas; se .5, usar vírgula
+        if abs(horas - round(horas)) < 1e-9:
+            txt = f"{int(round(horas))} horas"
+        else:
+            txt = f"{str(horas).replace('.', ',')} horas"
+
+        return gr.update(value=txt)
+    
+    # quando horas_diarias mudar
+    horas_diarias.change(
+        fn=calcular_total_horas,
+        inputs=[horas_diarias, total_dias],
+        outputs=total_horas_estagio
+    )
+
+    # quando total_dias mudar (datas / finais de semana / feriados)
+    total_dias.change(
+        fn=calcular_total_horas,
+        inputs=[horas_diarias, total_dias],
+        outputs=total_horas_estagio
+    )
+
+
     
         
     
