@@ -1005,14 +1005,61 @@ def processar_formulario(*args):
     print(f"Formação do(a) Supervisor(a): {dados['formacao_supervisor']}")
     print(f"Cargo/Função do(a) Supervisor(a) no(a) concedente: {dados['cargo_supervisor']}")
     print(f"Registro no Conselho: {dados['registro_conselho']}")
+    
+    # ... todas as validações passaram; aqui é SUCESSO
+
+    RADIOS = {
+        # Cláusula Segunda
+        "contar_finais_semana",     # Radio: ["Sim", "Não"]
+
+        # Cláusula Quarta
+        "horas_diarias",            # Radio: ["1,0", "1,5", ..., "8,0"]
+
+        # Cláusula Nona (espelhado, não editável)
+        "horas_diarias_plano",      # Radio: ["1,0", "1,5", ..., "8,0"]
+
+        # Campos de modalidade
+        "tipo_estagio",             # Radio: ["CURRICULAR OBRIGATÓRIO", "NÃO OBRIGATÓRIO"]
+        "modalidade_estagio",       # Radio (Curricular / Não obrigatório)
+
+        # Benefícios
+        "remunerado",               # Radio: ["Sim", "Não"]
+        "auxilio_transporte",       # Radio: ["Sim", "Não"]
+        "contraprestacao",          # Radio: ["Sim", "Não"]
+    }
+
+    DROPDOWNS = {
+        "uf",                       # Dropdown: estados
+        "uf_estudante",             # Dropdown: estados
+        # (se "curso_estudante" estiver como Dropdown, acrescente aqui;
+        # pelo que vi, no seu código ele é Text, então não incluí)
+    }
+
+    NUMBERS = {
+        "qtd_feriados",             # Number: inteiro >= 0
+    }
+
+    def _reset_update(nome: str):
+        # Radios
+        if nome in RADIOS:
+            return gr.update(value=None, elem_classes=[])
+        # Dropdowns
+        if nome in DROPDOWNS:
+            return gr.update(value=None, elem_classes=[])
+        # Numbers
+        if nome in NUMBERS:
+            return gr.update(value=None, elem_classes=[])
+        # Padrão: textos
+        return gr.update(value="", elem_classes=[])
+
+    out = []
+    for nome in nomes_completos:
+        out.append(_reset_update(nome))
 
     print("✅ Termo registrado com sucesso!")
     gr.Info("✅ Termo registrado com sucesso!")
-    
-    
-    # Limpa os campos após submissão (se desejar)
-    return [None] * len(args)
-    
+    return out
+
 
 with gr.Blocks(theme="default") as demo:
     gr.HTML("""
@@ -1688,9 +1735,6 @@ with gr.Blocks(theme="default") as demo:
         outputs=total_horas_estagio
     )
 
-
-    
-        
     
     # ==== ATIVIDADES DINÂMICAS (mín. 5, sem máximo prático) ====
 
