@@ -2,11 +2,54 @@ import gradio as gr
 from datetime import datetime, timedelta
 from num2words import num2words
 import re, time, httpx, unicodedata
+from textwrap import dedent
 # gradio==5.34.2
 # num2words==0.5.14
 
 from email_validator import validate_email, EmailNotValidError
 import dns.resolver
+
+import os
+from dotenv import load_dotenv
+
+# Carregar variáveis do .env
+load_dotenv()
+
+SMTP_HOST = os.getenv("SMTP_HOST")
+SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASS = os.getenv("SMTP_PASS")
+SMTP_TLS  = os.getenv("SMTP_TLS", "true").lower() == "true"
+FROM_EMAIL = os.getenv("FROM_EMAIL")
+
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
+
+
+def enviar_email(destinatario, assunto, corpo):
+    msg = MIMEMultipart()
+    msg["From"] = FROM_EMAIL
+    msg["To"] = destinatario
+    msg["Subject"] = assunto
+
+    # corpo do e-mail
+    msg.attach(MIMEText(corpo, "plain"))
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            if SMTP_TLS:
+                server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
+            print("✅ E-mail enviado com sucesso!")
+            # ... monta e envia com smtplib ...
+            return True
+    except Exception as e:
+        print("❌ Erro ao enviar e-mail:", e)
+        return False
+        
 
 UF_OPCOES = [
     "AC","AL","AM","AP","BA","CE","DF","ES","GO","MA",
@@ -353,30 +396,62 @@ def validar_rg_front(valor: str):
 def _so_digitos(s: str) -> str:
     return re.sub(r"\D", "", s or "")
 
+# DDDs válidos (ANATEL): 11-19, 21-24, 27-28, 31-35, 37-38, 41-49, 51-55,
+# 61-69, 71-75, 77, 79, 81-89, 91-99
+DDD_VALIDOS = {
+    *[str(x) for x in range(11,20)],
+    *[str(x) for x in range(21,25)], 27, 28,
+    *[str(x) for x in range(31,36)], 37, 38,
+    *[str(x) for x in range(41,50)],
+    *[str(x) for x in range(51,56)],
+    *[str(x) for x in range(61,70)],
+    *[str(x) for x in range(71,76)], 77, 79,
+    *[str(x) for x in range(81,90)],
+    *[str(x) for x in range(91,100)],
+}
+DDD_VALIDOS = {str(x) for x in DDD_VALIDOS}  # garante strings
+
+def _todos_iguais(s: str) -> bool:
+    return s and all(ch == s[0] for ch in s)
+
 def telefone_valido_br(dig: str) -> bool:
     """
     Regras (Brasil):
     - Aceita DDD + número: 10 dígitos (fixo) ou 11 dígitos (celular).
-    - Permite prefixo +55 (12 ou 13 dígitos com o 55; removemos antes de validar).
+    - Permite prefixo +55 (12 ou 13 dígitos; removemos antes de validar).
+    - DDD deve ser válido (ANATEL).
+    - Fixo: primeiro dígito do número (após DDD) ∈ {2,3,4,5}.
+    - Celular: primeiro dígito do número (após DDD) = 9.
+    - Rejeita sequências inválidas (número local todo zero ou todos dígitos iguais).
     """
     d = _so_digitos(dig)
 
-    # se começa com 55
-    if d.startswith("55"):
-        # precisa ter 12 (55 + 10 fixo) ou 13 (55 + 11 celular)
-        if len(d) in (12, 13):
-            d = d[2:]
-        else:
-            return False  # já corta aqui
+    # remove +55 se vier junto e o comprimento for compatível
+    if d.startswith("55") and len(d) in (12, 13):
+        d = d[2:]
 
-    # fixo: 10 dígitos
-    if len(d) == 10 and d[0] != "0":
-        return True
-    # celular: 11 dígitos, terceiro dígito = 9
-    if len(d) == 11 and d[0] != "0" and d[2] == "9":
-        return True
+    # precisa ser 10 (fixo) ou 11 (celular)
+    if len(d) not in (10, 11):
+        return False
 
-    return False
+    ddd = d[:2]
+    numero = d[2:]
+
+    # DDD válido
+    if ddd not in DDD_VALIDOS:
+        return False
+
+    # bloquear número local obviamente inválido
+    if set(numero) == {"0"} or _todos_iguais(numero):
+        return False
+
+    # regras de prefixo
+    if len(d) == 10:
+        # fixo começa em 2-5
+        return numero[0] in {"2", "3", "4", "5"}
+    else:
+        # celular começa em 9
+        return numero[0] == "9"
 
 def formatar_telefone_br(dig: str) -> str:
     d = _so_digitos(dig)
@@ -397,11 +472,9 @@ def validar_telefone(valor: str):
     raw = (valor or "").strip()
     if not raw:
         return gr.update(value="", elem_classes=[])
-
     if telefone_valido_br(raw):
         return gr.update(value=formatar_telefone_br(raw), elem_classes=[])
-
-    gr.Warning("⚠️ Telefone inválido. Use DDD + número, ex.: (64) 91234-5678.")
+    gr.Warning("⚠️ Telefone inválido. Ex.: fixo (62) 2345-6789 ou celular (62) 91234-5678.")
     return gr.update(value="", elem_classes=["erro"])
 
 # Resolver com DNS públicos e timeouts curtos
@@ -503,7 +576,8 @@ def _valida_cpf(d: str) -> bool:
     soma = sum(int(d[i]) * (10 - i) for i in range(9))
     dv1 = (soma * 10) % 11
     dv1 = 0 if dv1 == 10 else dv1
-    if dv1 != int(d[9]): return False
+    if dv1 != int(d[9]): 
+        return False
     soma = sum(int(d[i]) * (11 - i) for i in range(10))
     dv2 = (soma * 10) % 11
     dv2 = 0 if dv2 == 10 else dv2
@@ -552,21 +626,26 @@ def validar_cnpj_cpf(valor: str):
     return gr.update(value="", elem_classes=["erro"])
 
 def validar_cpf(valor: str):
-    d = _apenas_digitos(valor)
-    # vazio → não mexe (deixa o usuário digitar)
-    if not d:
+    raw = (valor or "").strip()
+
+    # se o campo foi deixado em branco, não marca erro (você valida obrigatoriedade no submit)
+    if not raw:
         return gr.update(value="", elem_classes=[])
-    
-    if len(d) == 11:
-        if _valida_cpf(d):
-            return gr.update(value=_formata_cpf(d), elem_classes=[])
-        else:
-            gr.Warning("⚠️ CPF inválido. Preencha no formato 000.000.000-00")
-            return gr.update(value="", elem_classes=["erro"])
-    
-     # tamanho inesperado
-    gr.Warning("⚠️ Número inválido. Informe um CPF (11 dígitos).")
-    return gr.update(value="", elem_classes=["erro"])
+
+    d = _apenas_digitos(raw)
+
+    # precisa ter 11 dígitos numéricos
+    if len(d) != 11:
+        gr.Warning("⚠️ CPF inválido. Informe 11 dígitos no formato 000.000.000-00.")
+        return gr.update(value="", elem_classes=["erro"])
+
+    # dígitos ok, checa DV
+    if not _valida_cpf(d):
+        gr.Warning("⚠️ CPF inválido. Verifique os dígitos verificadores.")
+        return gr.update(value="", elem_classes=["erro"])
+
+    # válido → formata e remove erro
+    return gr.update(value=_formata_cpf(d), elem_classes=[])
 
 def validar_horas_semanais(valor: str):
     if not valor or not str(valor).strip():
@@ -673,6 +752,103 @@ def calcular_total_dias(data_inicio, data_termino, contar_finais_semana, qtd_fer
     dias_efetivos = max(0, dias - feriados)
     return gr.update(value=f"{dias_efetivos} dias")
 
+
+def montar_corpo_email(dados: dict, atividades: list[str]) -> str:
+    g = lambda k: (str(dados.get(k, "") or "").strip())
+
+    atividades_linhas = [
+        f"{i}. {str(a).strip()}"
+        for i, a in enumerate(atividades, start=1)
+        if str(a or "").strip()
+    ]
+    bloco_atividades = (
+        "=== ATIVIDADES ===\n" + "\n".join(atividades_linhas) + "\n\n"
+        if atividades_linhas else ""
+    )
+
+    corpo = f"""
+    Prezado(a) Coordenador(a),
+
+    Segue dados para o Termo de Compromisso de Estágio do(a) estudante {g('nome_estudante')} a ser formalizado no SUAP.
+            
+    === TERMO DE COMPROMISSO DE ESTÁGIO ===
+    Tipo de Estágio: {g('tipo_estagio')}
+
+    === DADOS DO(A) CONCEDENTE ===
+    Razão Social: {g('razao_social')}
+    CNPJ: {g('cnpj')}
+    Nome Fantasia: {g('nome_fantasia')}
+    Endereço: {g('endereco')}
+    Bairro: {g('bairro')}
+    CEP: {g('cep')}
+    Complemento: {g('complemento')}
+    Cidade: {g('cidade')}
+    UF: {g('uf')}
+    E-mail: {g('email')}
+    Telefone: {g('telefone')}
+    Representante: {g('representante')}
+    CPF Representante: {g('cpf_repr')}
+
+    === DADOS DO(A) ESTUDANTE ===
+    Nome do(a) Estudante: {g('nome_estudante')}
+    Nascimento: {g('nascimento')}
+    CPF do(a) Estudante: {g('cpf_estudante')}
+    RG do(a) Estudante: {g('rg')}
+    Endereço do(a) Estudante: {g('endereco_estudante')}
+    Bairro do(a) Estudante: {g('bairro_estudante')}
+    CEP do(a) Estudante: {g('cep_estudante')}
+    Complemento: {g('complemento_estudante')}
+    Cidade do(a) Estudante: {g('cidade_estudante')}
+    UF do(a) Estudante: {g('uf_estudante')}
+    E-mail do(a) Estudante: {g('email_estudante')}
+    Telefone do(a) Estudante: {g('telefone_estudante')}
+    Curso do(a) Estudante: {g('curso_estudante')}
+    Ano/Período Letivo: {g('ano_periodo')}
+    Matrícula: {g('matricula')}
+    Orientador(a): {g('orientador')}
+
+    === CLÁUSULA SEGUNDA – DA DURAÇÃO ===
+    Data de Início: {g('data_inicio')}
+    Data de Término: {g('data_termino')}
+    Total de Dias de Estágio: {g('total_dias')}
+
+    === CLÁUSULA QUARTA – DA CARGA HORÁRIA ===
+    Horas Diárias: {g('horas_diarias')}
+    Horas Semanais de Estágio: {g('horas_semana_estagio')}
+    Total de Horas de Estágio: {g('total_horas_estagio')}
+
+    === CLÁUSULA SEXTA – DO SEGURO ===
+    Seguradora: {g('seguradora')}
+    Apólice: {g('apolice')}
+
+    === CLÁUSULA SÉTIMA – DOS BENEFÍCIOS ===
+    Modalidade do Estágio: {g('modalidade_estagio')}
+    Remunerado: {g('remunerado')}
+    Valor da Bolsa: {g('valor_bolsa')}
+    Valor por Extenso: {g('valor_extenso')}
+    Auxílio Transporte: {g('auxilio_transporte')}
+    Especificação do Auxílio Transporte: {g('especificacao_auxilio')}
+    Contraprestação de Serviços: {g('contraprestacao')}
+    Especificação da Contraprestação: {g('especificacao_contraprestacao')}
+
+    === CLÁUSULA NONA – PLANO DE ATIVIDADES DE ESTÁGIO ===
+    Horas Diárias no Plano: {g('horas_diarias_plano')}
+    Horas Semanais do Plano de Atividades: {g('horas_semanais_plano')}
+    Total de Horas do Plano de Atividades: {g('total_horas_plano')}
+    Horário das Atividades: {g('horario_atividades')}
+
+    {bloco_atividades}
+    === SUPERVISOR(A) DO ESTÁGIO ===
+    Nome do(a) Supervisor(a): {g('nome_supervisor')}
+    Formação do(a) Supervisor(a): {g('formacao_supervisor')}
+    Cargo/Função do(a) Supervisor(a) no(a) concedente: {g('cargo_supervisor')}
+    Registro no Conselho: {g('registro_conselho')}
+    
+    
+    Atenciosamente,  
+    {g('nome_estudante')}
+    """
+    return dedent(corpo).rstrip()
 
 
 # === Função principal ===
@@ -943,6 +1119,8 @@ def processar_formulario(*args):
 
     print("=== TERMO DE COMPROMISSO DE ESTÁGIO ===")
     print(f"Tipo de Estágio: {dados['tipo_estagio']}")
+    print()
+    print("=== DADOS DO(A) CONCEDENTE ===")
     print(f"Razão Social: {dados['razao_social']}")
     print(f"CNPJ: {dados['cnpj']}")
     print(f"Nome Fantasia: {dados['nome_fantasia']}")
@@ -956,6 +1134,8 @@ def processar_formulario(*args):
     print(f"Telefone: {dados['telefone']}")
     print(f"Representante: {dados['representante']}")
     print(f"CPF Representante: {dados['cpf_repr']}")
+    print()
+    print("=== DADOS DO(A) ESTUDANTE ===")
     print(f"Nome do(a) Estudante: {dados['nome_estudante']}")
     print(f"Nascimento: {dados['nascimento']}")
     print(f"CPF do(a) Estudante: {dados['cpf_estudante']}")
@@ -972,14 +1152,22 @@ def processar_formulario(*args):
     print(f"Ano/Período Letivo: {dados['ano_periodo']}")
     print(f"Matrícula: {dados['matricula']}")
     print(f"Orientador(a): {dados['orientador']}")
+    print()
+    print("=== CLÁUSULA SEGUNDA – DA DURAÇÃO ===")
     print(f"Data de Início: {dados['data_inicio']}")
     print(f"Data de Término: {dados['data_termino']}")
     print(f"Total de Dias de Estágio: {dados['total_dias']}")
+    print()
+    print("=== CLÁUSULA QUARTA – DA CARGA HORÁRIA ===")
     print(f"Horas Diárias: {dados['horas_diarias']}")
     print(f"Horas Semanais de Estágio: {dados['horas_semana_estagio']}")
     print(f"Total de Horas de Estágio: {dados['total_horas_estagio']}")
+    print()
+    print("=== CLÁUSULA SEXTA – DO SEGURO ===")
     print(f"Seguradora: {dados['seguradora']}")
     print(f"Apólice: {dados['apolice']}")
+    print()
+    print("=== CLÁUSULA SÉTIMA – DOS BENEFÍCIOS ===")
     print(f"Modalidade do Estágio: {dados['modalidade_estagio']}")
     print(f"Remunerado: {dados['remunerado']}")
     print(f"Valor da Bolsa: {dados['valor_bolsa']}")
@@ -988,6 +1176,8 @@ def processar_formulario(*args):
     print(f"Especificação do Auxílio Transporte: {dados['especificacao_auxilio']}")
     print(f"Contraprestação de Serviços: {dados['contraprestacao']}")
     print(f"Especificação da Contraprestação: {dados['especificacao_contraprestacao']}")
+    print()
+    print("=== CLÁUSULA NONA – PLANO DE ATIVIDADES DE ESTÁGIO ===")
     print(f"Horas Diárias no Plano: {dados['horas_diarias_plano']}")
     print(f"Horas Semanais do Plano de Atividades: {dados['horas_semanais_plano']}")
     print(f"Total de Horas do Plano de Atividades: {dados['total_horas_plano']}")
@@ -999,15 +1189,37 @@ def processar_formulario(*args):
         valor = str(atividade).strip()
         if valor:
             print(f"Atividade {i}: {valor}")
-
+    
     print("=== SUPERVISOR(A) DO ESTÁGIO ===")
     print(f"Nome do(a) Supervisor(a): {dados['nome_supervisor']}")
     print(f"Formação do(a) Supervisor(a): {dados['formacao_supervisor']}")
     print(f"Cargo/Função do(a) Supervisor(a) no(a) concedente: {dados['cargo_supervisor']}")
     print(f"Registro no Conselho: {dados['registro_conselho']}")
     
-    # ... todas as validações passaram; aqui é SUCESSO
+    
+    # === Envia o e-mail após gerar as informações ===
+    email_destinatario = "estagio.cbe@ifgoiano.edu.br"
 
+    assunto = f"Termo de Compromisso de Estágio - {dados.get('nome_estudante','').strip()}"
+
+    corpo_email = montar_corpo_email(dados, atividades)
+
+    # Envia e trata visualmente sem interromper o retorno dos outputs
+    try:
+        ok = enviar_email(
+            destinatario=email_destinatario,
+            assunto=assunto,
+            corpo=corpo_email
+        )
+        if ok:
+            gr.Info("✅ TCE registrado e encaminhado com sucesso ao setor responsável.")
+        else:
+            gr.Warning("⚠️ Não foi possível enviar o e-mail agora. Tente novamente mais tarde.")
+    except Exception as e:
+        print(f"[ERRO] envio de e-mail: {e}")
+        gr.Warning("⚠️ Não foi possível enviar o e-mail agora. Tente novamente mais tarde.")
+
+   
     RADIOS = {
         # Cláusula Segunda
         "contar_finais_semana",     # Radio: ["Sim", "Não"]
@@ -1040,24 +1252,17 @@ def processar_formulario(*args):
     }
 
     def _reset_update(nome: str):
-        # Radios
-        if nome in RADIOS:
-            return gr.update(value=None, elem_classes=[])
-        # Dropdowns
-        if nome in DROPDOWNS:
-            return gr.update(value=None, elem_classes=[])
-        # Numbers
-        if nome in NUMBERS:
-            return gr.update(value=None, elem_classes=[])
-        # Padrão: textos
+        if nome in RADIOS:     return gr.update(value=None, elem_classes=[])
+        if nome in DROPDOWNS:  return gr.update(value=None, elem_classes=[])
+        if nome in NUMBERS:    return gr.update(value=None, elem_classes=[])
         return gr.update(value="", elem_classes=[])
 
     out = []
-    for nome in nomes_completos:
+    for nome in nomes_completos:   # mesma ordem de inputs/outputs
         out.append(_reset_update(nome))
 
-    print("✅ Termo registrado com sucesso!")
-    gr.Info("✅ Termo registrado com sucesso!")
+    #     print("✅ Termo registrado com sucesso!")
+    #     gr.Info("✅ Termo registrado com sucesso!")
     return out
 
 
@@ -1135,7 +1340,7 @@ with gr.Blocks(theme="default") as demo:
     </script>
     """)
 
-    gr.Markdown("<h2 style='text-align: center;'>TERMO DE COMPROMISSO DE ESTÁGIO</h2>")
+    gr.Markdown("<h2 style='text-align: center;'>TERMO DE COMPROMISSO DE ESTÁGIO - TCE</h2>")
     
     gr.Markdown("(*) Preenchimento obrigatório")
 
