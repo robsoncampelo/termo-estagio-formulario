@@ -12,6 +12,13 @@ import dns.resolver
 import os
 from dotenv import load_dotenv
 
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
+from email.message import EmailMessage
+
+
 # Carregar variáveis do .env
 load_dotenv()
 
@@ -22,31 +29,52 @@ SMTP_PASS = os.getenv("SMTP_PASS")
 SMTP_TLS  = os.getenv("SMTP_TLS", "true").lower() == "true"
 FROM_EMAIL = os.getenv("FROM_EMAIL")
 
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.mime.application import MIMEApplication
 
-
-def enviar_email(destinatario, assunto, corpo):
-    msg = MIMEMultipart()
-    msg["From"] = FROM_EMAIL
-    msg["To"] = destinatario
-    msg["Subject"] = assunto
-
-    # corpo do e-mail
-    msg.attach(MIMEText(corpo, "plain"))
-
+def enviar_email(destinatario: str, assunto: str, corpo: str, reply_to: str | None = None) -> bool:
+    """
+    Envia um e-mail texto (sem anexos). Retorna True se enviado com sucesso, False caso contrário.
+    - destinatario: string com o e-mail de destino
+    - assunto: assunto do e-mail
+    - corpo: corpo do e-mail (texto simples)
+    - reply_to: opcional, endereço para respostas (se None, usará FROM_EMAIL)
+    """
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+        # Monta mensagem (texto simples)
+        # Acrescenta aviso padrão de e-mail automático ao final do corpo
+        aviso_auto = "\n\n---\nEste é um e-mail automático. Favor não respondê-lo."
+        texto = f"{corpo.strip()}\n{aviso_auto}"
+
+        msg = EmailMessage()
+        msg.set_content(texto)
+        msg["Subject"] = assunto
+        # Recomendo usar um endereço "no-reply" ou o FROM_EMAIL configurado
+        msg["From"] = FROM_EMAIL
+        msg["To"] = destinatario
+
+        # Define Reply-To (evita que respostas vão para o remetente real)
+        reply_addr = reply_to or FROM_EMAIL
+        msg["Reply-To"] = reply_addr
+
+        # Cabeçalhos que sinalizam mensagem automática / bulk
+        msg["Auto-Submitted"] = "auto-generated"   # indica que mensagem foi gerada automaticamente
+        msg["Precedence"] = "bulk"                 # frequentemente usado para reduzir respostas automáticas
+        # opcional: List-Unsubscribe
+        # msg["List-Unsubscribe"] = "<mailto:unsubscribe@seu-dominio.com>"
+
+        # Envio via SMTP
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
             if SMTP_TLS:
                 server.starttls()
-            server.login(SMTP_USER, SMTP_PASS)
+            # login pode falhar se credenciais inválidas
+            if SMTP_USER and SMTP_PASS:
+                server.login(SMTP_USER, SMTP_PASS)
             server.send_message(msg)
-            print("✅ E-mail enviado com sucesso!")
-            # ... monta e envia com smtplib ...
-            return True
+
+        # sucesso
+        return True
+
     except Exception as e:
+        # log no console (útil para diagnosticar no Render)
         print("❌ Erro ao enviar e-mail:", e)
         return False
         
@@ -1199,6 +1227,7 @@ def processar_formulario(*args):
     
     # === Envia o e-mail após gerar as informações ===
     email_destinatario = "estagio.cbe@ifgoiano.edu.br"
+    #email_destinatario = "robson.campelo@gmail.com"
 
     assunto = f"Termo de Compromisso de Estágio - {dados.get('nome_estudante','').strip()}"
 
@@ -1209,7 +1238,8 @@ def processar_formulario(*args):
         ok = enviar_email(
             destinatario=email_destinatario,
             assunto=assunto,
-            corpo=corpo_email
+            corpo=corpo_email,
+            reply_to="no-reply@ifgoiano.edu.br"
         )
         if ok:
             gr.Info("✅ TCE registrado e encaminhado com sucesso ao setor responsável.")
