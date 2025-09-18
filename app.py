@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from num2words import num2words
 import re, time, httpx, unicodedata
 from textwrap import dedent
+from decimal import Decimal, InvalidOperation
 # gradio==5.34.2
 # num2words==0.5.14
 
@@ -784,6 +785,56 @@ def calcular_total_dias(data_inicio, data_termino, contar_finais_semana, qtd_fer
 def montar_corpo_email(dados: dict, atividades: list[str]) -> str:
     g = lambda k: (str(dados.get(k, "") or "").strip())
 
+    def _fmt_horas(v: str) -> str:
+        """
+        Converte '4,0' -> '4h' ; '4,5' -> '4h30min' ; '0,5' -> '30min'
+        Aceita vírgula ou ponto como separador decimal.
+        """
+        s = (v or "").strip()
+        if not s:
+            return ""
+        try:
+            # aceita "4,5" ou "4.5"
+            val = float(s.replace(",", "."))
+            if val < 0:
+                return s  # não formata valores negativos
+            h = int(val)
+            m = int(round((val - h) * 60))
+            # trata arredondamento 59.999 -> 60
+            if m == 60:
+                h += 1
+                m = 0
+            if h > 0 and m > 0:
+                return f"{h}h{m:02d}min"
+            if h > 0 and m == 0:
+                return f"{h}h"
+            if h == 0 and m > 0:
+                return f"{m}min"
+            return "0h"
+        except ValueError:
+            return s
+
+    def _fmt_brl(v: str) -> str:
+        """
+        Converte '759' -> 'R$ 759,00' ; '1234,5' -> 'R$ 1.234,50'
+        Aceita vírgula ou ponto como separador decimal; ignora separador de milhar comum.
+        """
+        s = (v or "").strip()
+        if not s:
+            return ""
+        # normaliza: remove separadores de milhar e padroniza decimal com ponto
+        # exemplos aceitos: '1.234,56' | '1234,56' | '1234.56' | '759'
+        normalized = s.replace(".", "").replace(",", ".")
+        try:
+            quant = Decimal(normalized).quantize(Decimal("0.01"))
+            # formata em padrão en_US e depois troca separadores para pt-BR
+            en = f"{quant:,.2f}"           # '1,234.56'
+            br = en.replace(",", "X").replace(".", ",").replace("X", ".")
+            return f"R$ {br}"
+        except (InvalidOperation, ValueError):
+            # se não conseguir converter, retorna como veio (sem quebrar fluxo)
+            return s
+
     atividades_linhas = [
         f"{i}. {str(a).strip()}"
         for i, a in enumerate(atividades, start=1)
@@ -841,7 +892,7 @@ def montar_corpo_email(dados: dict, atividades: list[str]) -> str:
     Total de Dias de Estágio: {g('total_dias')}
 
     === CLÁUSULA QUARTA – DA CARGA HORÁRIA ===
-    Horas Diárias: {g('horas_diarias')}
+    Horas Diárias: {_fmt_horas(g('horas_diarias'))}
     Horas Semanais de Estágio: {g('horas_semana_estagio')}
     Total de Horas de Estágio: {g('total_horas_estagio')}
 
@@ -852,7 +903,7 @@ def montar_corpo_email(dados: dict, atividades: list[str]) -> str:
     === CLÁUSULA SÉTIMA – DOS BENEFÍCIOS ===
     Modalidade do Estágio: {g('modalidade_estagio')}
     Remunerado: {g('remunerado')}
-    Valor da Bolsa: {g('valor_bolsa')}
+    Valor da Bolsa: {_fmt_brl(g('valor_bolsa'))}
     Valor por Extenso: {g('valor_extenso')}
     Auxílio Transporte: {g('auxilio_transporte')}
     Especificação do Auxílio Transporte: {g('especificacao_auxilio')}
