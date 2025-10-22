@@ -1,5 +1,5 @@
 import gradio as gr
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from num2words import num2words
 import re, time, httpx, unicodedata
 from textwrap import dedent
@@ -86,6 +86,49 @@ UF_OPCOES = [
     "RO","RR","RS","SC","SE","SP","TO"
 ]
 UF_OPCOES_SET = set(UF_OPCOES)  # membership rápido
+
+from datetime import date
+
+def _parse_iso_date(s: str):
+    try:
+        return date.fromisoformat((s or "").strip())
+    except Exception:
+        return None
+
+def validar_nascimento_estudante(valor: str):
+    raw = (valor or "").strip()
+    if not raw:
+        return gr.update(value="", elem_classes=[])
+    d = _parse_iso_date(raw)
+    if not d:
+        gr.Warning("⚠️ Data inválida.")
+        return gr.update(value=raw, elem_classes=["erro"])
+    if d > date.today():
+        gr.Warning("⚠️ A data de nascimento não pode ser futura.")
+        return gr.update(value=raw, elem_classes=["erro"])
+    return gr.update(value=raw, elem_classes=[])
+
+
+def validar_nascimento_representante(valor: str):
+    raw = (valor or "").strip()
+    if not raw:
+        return gr.update(value="", elem_classes=[])
+    d = _parse_iso_date(raw)
+    if not d:
+        gr.Warning("⚠️ Data inválida.")
+        return gr.update(value=raw, elem_classes=["erro"])
+    hoje = date.today()
+    if d > hoje:
+        gr.Warning("⚠️ A data de nascimento não pode ser futura.")
+        return gr.update(value=raw, elem_classes=["erro"])
+    try:
+        limite_18 = hoje.replace(year=hoje.year - 18)
+    except ValueError:
+        limite_18 = hoje.replace(month=2, day=28, year=hoje.year - 18)
+    if d > limite_18:
+        gr.Warning("⚠️ O Representante deve ter pelo menos 18 anos.")
+        return gr.update(value=raw, elem_classes=["erro"])
+    return gr.update(value=raw, elem_classes=[])
 
 
 VIACEP_URL = "https://viacep.com.br/ws/{cep}/json/"
@@ -368,57 +411,113 @@ def validar_cidade_uf_blur(cep_val, cidade_val, uf_val):
         gr.update(value=(uf_val or None),  elem_classes=[]),
     )
 
-    
-def rg_normalizar(raw: str) -> str:
-    # remove tudo que não for dígito ou X/x
-    import re
-    v = re.sub(r"[^0-9Xx]", "", raw or "").upper()
-    if "X" in v[:-1]:  # X só pode ser no final
-        return v  # inválido, deixo a validação tratar
-    return v
 
-def rg_valido(br_rg: str) -> bool:
-    v = rg_normalizar(br_rg)
-    if not v:
-        return False
-    if "X" in v[:-1]:
-        return False
-    corpo = v[:-1] if v[-1] == "X" else v
-    if not corpo.isdigit():
-        return False
-    return 7 <= len(v) <= 10
+# def rg_normalizar(raw: str) -> str: # OK
+#     # remove tudo que não for dígito ou X/x
+#     import re
+#     v = re.sub(r"[^0-9Xx]", "", raw or "").upper()
+#     if "X" in v[:-1]:  # X só pode ser no final
+#         return v  # inválido, deixo a validação tratar
+#     return v
 
-def rg_formatar(br_rg: str) -> str:
-    v = rg_normalizar(br_rg)
-    if not v:
+# def rg_valido(br_rg: str) -> bool: # OK
+#     v = rg_normalizar(br_rg)
+#     if not v:
+#         return False
+#     if "X" in v[:-1]:
+#         return False
+#     corpo = v[:-1] if v[-1] == "X" else v
+#     if not corpo.isdigit():
+#         return False
+#     return 7 <= len(v) <= 10
+
+# def rg_formatar(br_rg: str) -> str: # OK
+#     v = rg_normalizar(br_rg)
+#     if not v:
+#         return ""
+#     dv = v[-1] if v[-1] == "X" else v[-1]
+#     corpo = v[:-1] if v[-1] in "X0123456789" else v
+#     if corpo.isdigit():
+#         if len(v) == 9:   # 8+DV
+#             return f"{corpo[:2]}.{corpo[2:5]}.{corpo[5:8]}-{dv}"
+#         if len(v) == 8:   # 7+DV
+#             return f"{corpo[:1]}.{corpo[1:4]}.{corpo[4:7]}-{dv}"
+#     return v  # fallback sem máscara
+
+
+# PRESERVAR_PONTUACAO_RG = True  # mantém exatamente como o usuário digitou quando RG for válido
+
+# def rg_normaliza(raw: str) -> str:
+#     """
+#     Mantém apenas dígitos e, se houver, UM 'X' final (maiúsculo).
+#     Ex.: '12.345.678-9' -> '123456789', '12.345.678-x' -> '12345678X'
+#     """
+#     s = (raw or "").strip().upper()
+#     s = re.sub(r"[^0-9X]", "", s)
+#     if "X" in s[:-1]:   # 'X' só pode no fim
+#         s = s.replace("X", "")
+#     return s
+
+PRESERVAR_PONTUACAO_RG = True  # mantém como digitado quando RG for válido
+
+def rg_eh_rg_simples(raw: str) -> bool:
+    """
+    RG simples (7–10), aceita só dígitos e 'X' APENAS no final (e no máximo 1).
+    Bloqueia todos zeros/todos iguais.
+    """
+    s = (raw or "").strip().upper()
+
+    # 🔴 Rejeita já aqui: 'X' fora do final ou mais de um 'X'
+    if 'X' in s and (s.count('X') > 1 or not s.endswith('X')):
+        return False
+
+    # mantém apenas dígitos e, se houver, um 'X' final
+    n = re.sub(r"[^0-9X]", "", s)
+
+    # faixa da sua versão original
+    if not (7 <= len(n) <= 10):
+        return False
+
+    # separa corpo/dv
+    if n.endswith('X'):
+        corpo = n[:-1]
+        if not corpo.isdigit():
+            return False
+    else:
+        if not n.isdigit():
+            return False
+        corpo = n
+
+    # bloqueios
+    if set(corpo) == {'0'} or len(set(corpo)) == 1:
+        return False
+
+    return True
+
+def rg_formatar(raw: str) -> str:
+    """Formata RG: pontos a cada 3 + hífen antes do último caractere."""
+    s = (raw or "").strip().upper()
+    # não mexa na regra do X aqui; só formata o que vier
+    n = re.sub(r"[^0-9X]", "", s)
+    if not n:
         return ""
-    dv = v[-1] if v[-1] == "X" else v[-1]
-    corpo = v[:-1] if v[-1] in "X0123456789" else v
-    if corpo.isdigit():
-        if len(v) == 9:   # 8+DV
-            return f"{corpo[:2]}.{corpo[2:5]}.{corpo[5:8]}-{dv}"
-        if len(v) == 8:   # 7+DV
-            return f"{corpo[:1]}.{corpo[1:4]}.{corpo[4:7]}-{dv}"
-    return v  # fallback sem máscara
-
-
-# toggle de comportamento (se quiser voltar a autoformatar no futuro)
-PRESERVAR_PONTUACAO_RG = True
+    corpo, dv = n[:-1], n[-1]
+    grupos, rest = [], corpo
+    while rest:
+        grupos.append(rest[:3]); rest = rest[3:]
+    base = ".".join(grupos) if grupos else ""
+    return f"{base}-{dv}" if base else n
 
 def validar_rg_front(valor: str):
     raw = (valor or "").strip()
     if not raw:
         return gr.update(value="", elem_classes=[])
-
-    # usa rg_valido(raw) que valida pelo "normalizado", ignorando pontuação
-    if rg_valido(raw):
-        # mantém exatamente como o usuário digitou (só tira espaços nas pontas)
-        if PRESERVAR_PONTUACAO_RG:
-            return gr.update(value=raw, elem_classes=[])
-        # opcional: se desligar o toggle, volta a aplicar máscara padrão
-        return gr.update(value=rg_formatar(raw), elem_classes=[])
-
-    gr.Warning("⚠️ RG inválido. Use apenas dígitos e, se houver, 'X' no final. Ex.: 12.345.678-9")
+    if rg_eh_rg_simples(raw):
+        return gr.update(
+            value=(raw if PRESERVAR_PONTUACAO_RG else rg_formatar(raw)),
+            elem_classes=[]
+        )
+    gr.Warning("⚠️ RG inválido. Use 7–10 dígitos (opcional 'X' só no final). Ex.: 12.345.678-9")
     return gr.update(value="", elem_classes=["erro"])
 
 
@@ -866,6 +965,7 @@ def montar_corpo_email(dados: dict, atividades: list[str]) -> str:
     E-mail: {g('email')}
     Telefone: {g('telefone')}
     Representante: {g('representante')}
+    Nascimento do Representante: {g('nascimento_repr')}
     CPF Representante: {g('cpf_repr')}
 
     === DADOS DO(A) ESTUDANTE ===
@@ -939,7 +1039,11 @@ def processar_formulario(*args):
     nomes_fixos = [
         "tipo_estagio", "razao_social", "cnpj", "nome_fantasia", "endereco", "bairro",
         "cep", "complemento", "cidade", "uf", "email", "telefone",
-        "representante", "cpf_repr", "nome_estudante", "nascimento", "cpf_estudante", "rg",
+        "representante", 
+        "nascimento_repr",
+        "cpf_repr", 
+        "nome_estudante", 
+        "nascimento", "cpf_estudante", "rg",
         "endereco_estudante", "bairro_estudante", "cep_estudante", "complemento_estudante",
         "cidade_estudante", "uf_estudante", "email_estudante", "telefone_estudante", "curso_estudante",
         "ano_periodo", "matricula", "orientador", "data_inicio", "data_termino", "total_dias",
@@ -989,9 +1093,10 @@ def processar_formulario(*args):
         "email": "E-mail",
         "telefone": "Telefone",
         "representante": "Representante Legal",
+        "nascimento_repr": "Data de Nascimento do Representante",
         "cpf_repr": "CPF do Representante Legal",
         "nome_estudante": "Nome do(a) Estudante",
-        "nascimento": "Data de Nascimento",
+        "nascimento": "Data de Nascimento do Estudante",
         "cpf_estudante": "CPF do(a) Estudante",
         "rg": "RG",
         "endereco_estudante": "Endereço do(a) Estudante",
@@ -1089,73 +1194,111 @@ def processar_formulario(*args):
     )
     if not ok_estudante:
         return updates
+    
+    # =========================
+    # 1) Validação das Datas de Nascimento
+    # =========================
+    ANO_MIN = 1900
+    
+    def _parse_iso_date_local(s: str):
+        try:
+            return date.fromisoformat((s or "").strip())
+        except Exception:
+            return None
+    
+    def _ano_ok(d: date) -> bool:
+        return ANO_MIN <= d.year <= date.today().year
 
-    # =========================
-    # 2) Obrigatórios gerais
-    # =========================
-    erros_rotulos = []
-    for idx, nome in enumerate(nomes_completos[:len(args)]):
-        obrigatorio = nome in campos_obrigatorios
-        valor = args[idx]
-        vazio = (valor is None) or (str(valor).strip().lower() in ["", "none"])
-        if obrigatorio and vazio:
-            marcar_erro(nome, True)
-            erros_rotulos.append(campos_obrigatorios[nome])
-        else:
-            marcar_erro(nome, False)
 
-    if erros_rotulos:
-        lista = ", ".join(erros_rotulos[:4]) + ("..." if len(erros_rotulos) > 4 else "")
-        gr.Warning(f"⚠️ Preencha os campos obrigatórios destacados em vermelho: {lista}.")
-        return updates
+    # 1) Validações específicas
+    campos_com_erro = set()
 
-    # =========================
-    # 3) Datas com borda vermelha
-    # =========================
+    def falha_especifica(nome, idx, msg):
+        updates[idx] = gr.update(elem_classes=["erro"])
+        gr.Warning(msg)
+        campos_com_erro.add(nome)
+
+    # idx e valores crus
+    idx_nasc      = nomes_completos.index("nascimento")
+    idx_nasc_repr = nomes_completos.index("nascimento_repr")
+
+    nasc_raw      = (dados.get("nascimento") or "").strip()
+    nasc_repr_raw = (dados.get("nascimento_repr") or "").strip()
+    
+#     print("DBG nasc_raw =", repr(nasc_raw))
+#     print("DBG nasc_repr_raw =", repr(nasc_repr_raw))
+
+    hoje = date.today()
+    # trata 29/02 em anos não bissextos
+    try:
+        limite_18 = hoje.replace(year=hoje.year - 18)
+    except ValueError:
+        limite_18 = hoje.replace(month=2, day=28, year=hoje.year - 18)
+
+    # Estudante — se veio preenchido: inválida/futura
+    if nasc_raw:
+        d = _parse_iso_date_local(nasc_raw)
+        if not d or not _ano_ok(d):
+            falha_especifica("nascimento", idx_nasc, f"⚠️ Data de nascimento inválida (ano deve ser ≥ {ANO_MIN}).")
+        elif d > hoje:
+            falha_especifica("nascimento", idx_nasc, "⚠️ A data de nascimento do(a) estudante não pode ser futura.")
+
+
+    # Representante — se veio preenchido: inválida/futura/<18
+    if nasc_repr_raw:
+        d = _parse_iso_date_local(nasc_repr_raw)
+        if not d or not _ano_ok(d):
+            falha_especifica("nascimento_repr", idx_nasc_repr,\
+                             f"⚠️ Data de nascimento do(a) representante inválida (ano deve ser ≥ {ANO_MIN}).")
+        elif d > hoje:
+            falha_especifica("nascimento_repr", idx_nasc_repr,\
+                             "⚠️ A data de nascimento do(a) representante não pode ser futura.")
+        elif d > limite_18:
+            falha_especifica("nascimento_repr", idx_nasc_repr, "⚠️ O(A) representante deve ter pelo menos 18 anos.")
+
     data_inicio  = dados["data_inicio"]
     data_termino = dados["data_termino"]
     nascimento   = dados["nascimento"]
+    nascimento_repr = dados["nascimento_repr"]
 
-    faltou_i = not data_inicio
-    faltou_t = not data_termino
-    faltou_n = not nascimento
-
-    if faltou_i or faltou_t:
-        if faltou_i: marcar_erro("data_inicio", True)
-        if faltou_t: marcar_erro("data_termino", True)
-        gr.Warning("⚠️ Você precisa informar a data de início e a data de término do estágio.")
-        return updates
-
-    if faltou_n:
-        marcar_erro("nascimento", True)
-        gr.Warning("⚠️ O campo 'Data de Nascimento' é obrigatório.")
-        return updates
-
+    # datas obrigatórias de período
     try:
-        dt_inicio     = datetime.strptime(data_inicio,  "%Y-%m-%d")
-        dt_termino    = datetime.strptime(data_termino, "%Y-%m-%d")
-        dt_nascimento = datetime.strptime(nascimento,   "%Y-%m-%d")
+        dt_inicio  = datetime.strptime(data_inicio,  "%Y-%m-%d")
+        dt_termino = datetime.strptime(data_termino, "%Y-%m-%d")
     except ValueError:
-        marcar_erro("data_inicio", True)
-        marcar_erro("data_termino", True)
-        marcar_erro("nascimento", True)
-        gr.Warning("⚠️ Formato inválido de data. Use o seletor de calendário.")
+        gr.Warning("⚠️ Formato inválido de data (início/término). Use o seletor de calendário.")
         return updates
+
+    # nascimento do estudante (opcional aqui, erros específicos já foram avisados acima)
+    dt_nascimento = None
+    if nascimento:
+        try:
+            dt_nascimento = datetime.strptime(nascimento, "%Y-%m-%d")
+        except ValueError:
+            # Se quiser, marque o campo como erro específico, em vez de mensagem genérica:
+            falha_especifica("nascimento", idx_nasc, "⚠️ Data de nascimento inválida.")
+            return updates
+
+    # nascimento do representante (idem)
+    dt_nascimento_repr = None
+    if nascimento_repr:
+        try:
+            dt_nascimento_repr = datetime.strptime(nascimento_repr, "%Y-%m-%d")
+        except ValueError:
+            falha_especifica("nascimento_repr", idx_nasc_repr, "⚠️ Data de nascimento do(a) representante inválida.")
+            return updates
 
     if dt_termino < dt_inicio:
-        marcar_erro("data_inicio", True)
-        marcar_erro("data_termino", True)
         gr.Warning("⚠️ A data de término não pode ser anterior à data de início.")
         return updates
 
-    # tudo ok nas datas → limpa
-    marcar_erro("data_inicio", False)
-    marcar_erro("data_termino", False)
-    marcar_erro("nascimento", False)
+    dados['data_inicio']      = dt_inicio.strftime("%d/%m/%Y")
+    dados['data_termino']     = dt_termino.strftime("%d/%m/%Y")
+    if dt_nascimento:
+        dados['nascimento']   = dt_nascimento.strftime("%d/%m/%Y")
+    if dt_nascimento_repr:
+        dados['nascimento_repr'] = dt_nascimento_repr.strftime("%d/%m/%Y")
 
-    dados['data_inicio']  = dt_inicio.strftime("%d/%m/%Y")
-    dados['data_termino'] = dt_termino.strftime("%d/%m/%Y")
-    dados['nascimento']   = dt_nascimento.strftime("%d/%m/%Y")
 
     # (Se você precisa dos formatos dd/mm/aaaa depois, faça a conversão aqui em variáveis locais,
     #   mas NÃO altere args; o 'updates' é só para UI)
@@ -1191,9 +1334,37 @@ def processar_formulario(*args):
 
         gr.Warning(f"⚠️ Informe pelo menos {MIN_REQ} atividades (faltam {faltam}).")
         return updates
+    
+    # =========================
+    # Obrigatórios gerais
+    # =========================
+    erros_rotulos = []
+    for idx, nome in enumerate(nomes_completos[:len(args)]):
+        if nome in campos_com_erro:
+            # já marcamos erro específico e mostramos mensagem
+            continue
+
+        obrigatorio = nome in campos_obrigatorios
+        valor = args[idx]
+        vazio = (valor is None) or (str(valor).strip().lower() in ["", "none"])
+
+        if obrigatorio and vazio:
+            marcar_erro(nome, True)  # preencha updates[idx] internamente, como você já faz
+            erros_rotulos.append(campos_obrigatorios[nome])
+        else:
+            marcar_erro(nome, False)
+
+    if campos_com_erro or erros_rotulos:
+        if erros_rotulos:
+            lista = ", ".join(erros_rotulos[:4]) + ("..." if len(erros_rotulos) > 4 else "")
+            gr.Warning(f"⚠️ Preencha os campos obrigatórios destacados em vermelho: {lista}.")
+        # ATENÇÃO: se sua função espera lista de updates na ordem,
+        # converta aqui (ex.: with_indices -> list). Se você já usa dict->list em outro ponto, chame o mesmo helper.
+        return updates  # ou: return out_list
+
 
     # ------------------------------
-    # 6) Se chegou aqui, está tudo OK — siga com o resto do processamento
+    # Se chegou aqui, está tudo OK — siga com o resto do processamento
     # (geração de PDF, prints, etc.)
 
     print("=== TERMO DE COMPROMISSO DE ESTÁGIO ===")
@@ -1212,6 +1383,7 @@ def processar_formulario(*args):
     print(f"E-mail: {dados['email']}")
     print(f"Telefone: {dados['telefone']}")
     print(f"Representante: {dados['representante']}")
+    print(f"Data de Nascimento do Representante: {dados['nascimento_repr']}")
     print(f"CPF Representante: {dados['cpf_repr']}")
     print()
     print("=== DADOS DO(A) ESTUDANTE ===")
@@ -1277,6 +1449,18 @@ def processar_formulario(*args):
     
     
     # === Envia o e-mail após gerar as informações ===
+    
+    # Define o destinatário (pelo curso, ou fallback)
+#     mapa_destinatarios = {
+#         "Bacharelado em Administração": "lpa.cbe@ifgoiano.edu.br",
+#         "Bacharelado em Zootecnia": "coordbachzoo.cbe@ifgoiano.edu.br",
+#         "Técnico em Agropecuária": "coortecagro.cbe@ifgoiano.edu.br",
+#         "Técnico em Administração": "coordtecadm.cbe@ifgoiano.edu.br",
+#         "Técnico em Informática": "coordtecinfo.cbe@ifgoiano.edu.br",
+#     }
+#     curso = (dados.get("curso_estudante") or "").strip()
+#     email_destinatario = mapa_destinatarios.get(curso, "estagio.cbe@ifgoiano.edu.br")  # fallback de testes
+
     email_destinatario = "estagio.cbe@ifgoiano.edu.br"
     #email_destinatario = "robson.campelo@gmail.com"
 
@@ -1302,49 +1486,46 @@ def processar_formulario(*args):
 
    
     RADIOS = {
-        # Cláusula Segunda
-        "contar_finais_semana",     # Radio: ["Sim", "Não"]
-
-        # Cláusula Quarta
-        "horas_diarias",            # Radio: ["1,0", "1,5", ..., "8,0"]
-
-        # Cláusula Nona (espelhado, não editável)
-        "horas_diarias_plano",      # Radio: ["1,0", "1,5", ..., "8,0"]
-
-        # Campos de modalidade
-        "tipo_estagio",             # Radio: ["CURRICULAR OBRIGATÓRIO", "NÃO OBRIGATÓRIO"]
-        "modalidade_estagio",       # Radio (Curricular / Não obrigatório)
-
-        # Benefícios
-        "remunerado",               # Radio: ["Sim", "Não"]
-        "auxilio_transporte",       # Radio: ["Sim", "Não"]
-        "contraprestacao",          # Radio: ["Sim", "Não"]
+        "contar_finais_semana",
+        "horas_diarias",
+        "horas_diarias_plano",
+        "tipo_estagio",
+        "modalidade_estagio",
+        "remunerado",
+        "auxilio_transporte",
+        "contraprestacao",
+        "possui_cin",
     }
 
     DROPDOWNS = {
-        "uf",                       # Dropdown: estados
-        "uf_estudante",             # Dropdown: estados
-        # (se "curso_estudante" estiver como Dropdown, acrescente aqui;
-        # pelo que vi, no seu código ele é Text, então não incluí)
+        "uf",
+        "uf_estudante",
     }
 
     NUMBERS = {
-        "qtd_feriados",             # Number: inteiro >= 0
+        "qtd_feriados",  # só terá efeito se estiver em nomes_completos
     }
 
     def _reset_update(nome: str):
-        if nome in RADIOS:     return gr.update(value=None, elem_classes=[])
-        if nome in DROPDOWNS:  return gr.update(value=None, elem_classes=[])
-        if nome in NUMBERS:    return gr.update(value=None, elem_classes=[])
+        if nome in RADIOS:
+            return gr.update(value=("Não" if nome == "possui_cin" else None), elem_classes=[])
+        if nome in DROPDOWNS:
+            return gr.update(value=None, elem_classes=[])
+        if nome in NUMBERS:
+            return gr.update(value=None, elem_classes=[])
+        if nome in {"nascimento", "nascimento_repr"}:
+            return gr.update(value="", elem_classes=[])
         return gr.update(value="", elem_classes=[])
 
     out = []
-    for nome in nomes_completos:   # mesma ordem de inputs/outputs
+    for nome in nomes_completos:
         out.append(_reset_update(nome))
 
-    #     print("✅ Termo registrado com sucesso!")
-    #     gr.Info("✅ Termo registrado com sucesso!")
+#     print("✅ Termo registrado com sucesso!")
+#     gr.Info("✅ Termo registrado com sucesso!")
+
     return out
+
 
 
 with gr.Blocks(theme="default") as demo:
@@ -1401,7 +1582,7 @@ with gr.Blocks(theme="default") as demo:
         }
         </style>
         """)
-     
+    
      # CSS anti-erro (se já não tiver)
     gr.HTML("""
     <style>
@@ -1513,8 +1694,60 @@ with gr.Blocks(theme="default") as demo:
 
     with gr.Row():
         representante = gr.Text(label="Representante legal*")
+        
+        # seletor de data VISUAL
+        # Representante
+        gr.HTML("""
+        <label for="input-nascimento-repr">Data de Nascimento do Representante (use o seletor abaixo)*</label><br>
+        <input type="date" id="input-nascimento-repr"
+          oninput="
+            (function(){
+              const src = document.getElementById('input-nascimento-repr');
+              const dst = document.querySelector('#nascimento_repr input, #nascimento_repr textarea');
+              if (!src || !dst) return;
+              let v = src.value; // browsers válidos emitem YYYY-MM-DD
+              // fallback: se o navegador permitir digitação em DD/MM/AAAA, converte:
+              if (!v) {
+                const raw = src.value || '';
+                const m = raw.match(/^(\\d{2})\\/(\\d{2})\\/(\\d{4})$/);
+                if (m) v = `${m[3]}-${m[2]}-${m[1]}`;
+              }
+              // copie mesmo se vazio, para permitir validação no backend
+              // if (!v) return;
+              if (dst.value !== v) {
+                dst.value = v;
+                dst.dispatchEvent(new Event('input', { bubbles:true }));
+              }
+            })();
+          "
+          onchange="
+            (function(){
+              const src = document.getElementById('input-nascimento-repr');
+              const dst = document.querySelector('#nascimento_repr input, #nascimento_repr textarea');
+              if (!src || !dst) return;
+              let v = src.value;
+              if (!v) {
+                const raw = src.value || '';
+                const m = raw.match(/^(\\d{2})\\/(\\d{2})\\/(\\d{4})$/);
+                if (m) v = `${m[3]}-${m[2]}-${m[1]}`;
+              }
+              if (!v) return;
+              if (dst.value !== v) {
+                dst.value = v;
+                dst.dispatchEvent(new Event('input', { bubbles:true }));
+              }
+            })();
+          "
+        >
+        """)
+
+        nascimento_repr = gr.Textbox(elem_id="nascimento_repr", visible=False)
+
         cpf_repr = gr.Text(label="CPF (000.000.000-00)*", placeholder="Ex: 123.456.789-00")
-    
+                                     
+    # Representante
+    nascimento_repr.change(fn=validar_nascimento_representante, inputs=nascimento_repr, outputs=nascimento_repr)
+
     cpf_repr.blur(validar_cpf, inputs=cpf_repr, outputs=cpf_repr)
     
     gr.Markdown("Do outro lado o(a) estudante,")
@@ -1525,16 +1758,51 @@ with gr.Blocks(theme="default") as demo:
     
     with gr.Row():
         # Campo visual com seletor de data
+        # Estudante
         gr.HTML("""
         <label for="input-nascimento">Data de Nascimento (use o seletor abaixo)*</label><br>
-        <input type="date" id="input-nascimento" onchange="
-            const txt = document.querySelector('#nascimento textarea');
-            txt.value = this.value;
-            txt.dispatchEvent(new Event('input', { bubbles: true }));
-        ">
+        <input type="date" id="input-nascimento"
+          oninput="
+            (function(){
+              const src = document.getElementById('input-nascimento');
+              const dst = document.querySelector('#nascimento input, #nascimento textarea');
+              if (!src || !dst) return;
+              let v = src.value; // navegadores normalmente emitem YYYY-MM-DD
+              // fallback: se o usuário digitar DD/MM/AAAA, converte para ISO
+              if (!v) {
+                const raw = src.value || '';
+                const m = raw.match(/^(\\d{2})\\/(\\d{2})\\/(\\d{4})$/);
+                if (m) v = `${m[3]}-${m[2]}-${m[1]}`;
+              }
+              // copie mesmo se vazio, para permitir validação no backend
+              // if (!v) return;
+              if (dst.value !== v) {
+                dst.value = v;
+                dst.dispatchEvent(new Event('input', { bubbles:true }));
+              }
+            })();
+          "
+          onchange="
+            (function(){
+              const src = document.getElementById('input-nascimento');
+              const dst = document.querySelector('#nascimento input, #nascimento textarea');
+              if (!src || !dst) return;
+              let v = src.value;
+              if (!v) {
+                const raw = src.value || '';
+                const m = raw.match(/^(\\d{2})\\/(\\d{2})\\/(\\d{4})$/);
+                if (m) v = `${m[3]}-${m[2]}-${m[1]}`;
+              }
+              if (!v) return;
+              if (dst.value !== v) {
+                dst.value = v;
+                dst.dispatchEvent(new Event('input', { bubbles:true }));
+              }
+            })();
+          "
+        >
         """)
 
-        # Campo oculto que receberá o valor real
         nascimento = gr.Textbox(elem_id="nascimento", visible=False)
 
         cpf_estudante = gr.Textbox(
@@ -1542,13 +1810,41 @@ with gr.Blocks(theme="default") as demo:
             placeholder="Ex: 123.456.789-00"
         )
 
-        rg = gr.Text(label="RG*")
+        possui_cin = gr.Radio(
+            label="Possui a nova Carteira de Identidade Nacional (CIN)?",
+            choices=["Sim", "Não"],
+            value="Não",           # aparece “Não” marcado inicialmente
+            interactive=True
+        )
+        rg = gr.Text(label="RG ou CIN*", elem_id="rg_estudante")  # seu campo existente
+        
     
-    rg.blur(validar_rg_front, inputs=rg, outputs=rg)
+    def validar_rg_ou_cin(valor: str, opcao_cin: str):
+        if (opcao_cin or "").strip().lower() == "sim":
+            return validar_cpf(valor)   # mesma UX do CPF
+        return validar_rg_front(valor)  # RG simples
+
+    # Estudante
+    nascimento.change(fn=validar_nascimento_estudante, inputs=nascimento, outputs=nascimento)
     
+    # Quando sair do RG → valida conforme a escolha do Radio
+    rg.blur(
+        validar_rg_ou_cin,
+        inputs=[rg, possui_cin],
+        outputs=rg
+    )
+    
+    # Opcional, mas recomendado: ao trocar Sim/Não, revalidar o que já está no campo
+    possui_cin.change(
+        validar_rg_ou_cin,
+        inputs=[rg, possui_cin],
+        outputs=rg
+    )
+
     # valida ao sair do campo (estudante) — reutiliza a MESMA função
     cpf_estudante.blur(validar_cpf, inputs=cpf_estudante, outputs=cpf_estudante)
-        
+    
+    
     with gr.Row():
         endereco_estudante = gr.Text(label="Endereço*")
         bairro_estudante = gr.Text(label="Bairro*")
@@ -2104,7 +2400,7 @@ with gr.Blocks(theme="default") as demo:
         fn=processar_formulario, 
         inputs=[
             tipo_estagio, razao_social, cnpj, nome_fantasia, endereco, bairro, cep, complemento, cidade, uf, 
-            email, telefone, representante, cpf_repr, nome_estudante, nascimento, cpf_estudante, rg, 
+            email, telefone, representante, nascimento_repr, cpf_repr, nome_estudante, nascimento, cpf_estudante, rg, 
             endereco_estudante, bairro_estudante, cep_estudante, complemento_estudante, cidade_estudante, uf_estudante,
             email_estudante, telefone_estudante, curso_estudante, ano_periodo, matricula,
             orientador, data_inicio, data_termino, total_dias, horas_diarias, horas_semana_estagio, total_horas_estagio,
@@ -2116,7 +2412,7 @@ with gr.Blocks(theme="default") as demo:
         ],
         outputs=[
             tipo_estagio, razao_social, cnpj, nome_fantasia, endereco, bairro, cep, complemento, cidade, uf,
-            email, telefone, representante, cpf_repr, nome_estudante, nascimento, cpf_estudante, rg, 
+            email, telefone, representante, nascimento_repr, cpf_repr, nome_estudante, nascimento, cpf_estudante, rg, 
             endereco_estudante, bairro_estudante, cep_estudante, complemento_estudante, cidade_estudante, uf_estudante,
             email_estudante, telefone_estudante, curso_estudante, ano_periodo, matricula,
             orientador, data_inicio, data_termino, total_dias, horas_diarias, horas_semana_estagio, total_horas_estagio,
