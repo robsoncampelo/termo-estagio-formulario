@@ -2395,7 +2395,9 @@ with gr.Blocks(theme="default") as demo:
     
 
     # Botão de submissão
-    botao = gr.Button("Enviar Termo")
+    with gr.Row():
+        botao = gr.Button(value="Enviar Termo", variant="primary", elem_id="btn-enviar-termo")
+    
     botao.click(
         fn=processar_formulario, 
         inputs=[
