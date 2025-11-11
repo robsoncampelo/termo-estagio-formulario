@@ -76,7 +76,7 @@ def enviar_email(destinatario: str, assunto: str, corpo: str, reply_to: str | No
 
     except Exception as e:
         # log no console (útil para diagnosticar no Render)
-        print("❌ Erro ao enviar e-mail:", e)
+        print("❌ Erro ao enviar e-mail:", type(e).__name__, str(e))
         return False
         
 
@@ -1461,8 +1461,8 @@ def processar_formulario(*args):
 #     curso = (dados.get("curso_estudante") or "").strip()
 #     email_destinatario = mapa_destinatarios.get(curso, "estagio.cbe@ifgoiano.edu.br")  # fallback de testes
 
-    email_destinatario = "estagio.cbe@ifgoiano.edu.br"
-    #email_destinatario = "robson.campelo@gmail.com"
+    #email_destinatario = "estagio.cbe@ifgoiano.edu.br"
+    email_destinatario = "robson.campelo@gmail.com"
 
     assunto = f"Termo de Compromisso de Estágio - {dados.get('nome_estudante','').strip()}"
 
@@ -1481,8 +1481,7 @@ def processar_formulario(*args):
         else:
             gr.Warning("⚠️ Não foi possível enviar o e-mail agora. Tente novamente mais tarde.")
     except Exception as e:
-        print(f"[ERRO] envio de e-mail: {e}")
-        gr.Warning("⚠️ Não foi possível enviar o e-mail agora. Tente novamente mais tarde.")
+        gr.Warning("⚠️ [ERRO] Não foi possível enviar o e-mail agora. Tente novamente mais tarde.")
 
    
     RADIOS = {
