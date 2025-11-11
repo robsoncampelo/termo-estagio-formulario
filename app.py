@@ -31,53 +31,42 @@ SMTP_TLS  = os.getenv("SMTP_TLS", "true").lower() == "true"
 FROM_EMAIL = os.getenv("FROM_EMAIL")
 
 
-def enviar_email(destinatario: str, assunto: str, corpo: str, reply_to: str | None = None) -> bool:
+def enviar_email(destinatario: str, assunto: str, corpo: str, reply_to: str | None = None) -> tuple[bool, str]:
     """
-    Envia um e-mail texto (sem anexos). Retorna True se enviado com sucesso, False caso contrário.
-    - destinatario: string com o e-mail de destino
-    - assunto: assunto do e-mail
-    - corpo: corpo do e-mail (texto simples)
-    - reply_to: opcional, endereço para respostas (se None, usará FROM_EMAIL)
+    Envia um e-mail texto (sem anexos).
+    Retorna (status, mensagem):
+        - (True, "[EMAIL] OK: destinatário") em caso de sucesso
+        - (False, "[EMAIL][ERRO] TipoErro: descrição") em caso de falha
     """
     try:
-        # Monta mensagem (texto simples)
-        # Acrescenta aviso padrão de e-mail automático ao final do corpo
         aviso_auto = "\n\n---\nEste é um e-mail automático. Favor não respondê-lo."
         texto = f"{corpo.strip()}\n{aviso_auto}"
 
         msg = EmailMessage()
         msg.set_content(texto)
         msg["Subject"] = assunto
-        # Recomendo usar um endereço "no-reply" ou o FROM_EMAIL configurado
         msg["From"] = FROM_EMAIL
         msg["To"] = destinatario
+        msg["Reply-To"] = reply_to or FROM_EMAIL
+        msg["Auto-Submitted"] = "auto-generated"
+        msg["Precedence"] = "bulk"
 
-        # Define Reply-To (evita que respostas vão para o remetente real)
-        reply_addr = reply_to or FROM_EMAIL
-        msg["Reply-To"] = reply_addr
-
-        # Cabeçalhos que sinalizam mensagem automática / bulk
-        msg["Auto-Submitted"] = "auto-generated"   # indica que mensagem foi gerada automaticamente
-        msg["Precedence"] = "bulk"                 # frequentemente usado para reduzir respostas automáticas
-        # opcional: List-Unsubscribe
-        # msg["List-Unsubscribe"] = "<mailto:unsubscribe@seu-dominio.com>"
-
-        # Envio via SMTP
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
             if SMTP_TLS:
                 server.starttls()
-            # login pode falhar se credenciais inválidas
             if SMTP_USER and SMTP_PASS:
                 server.login(SMTP_USER, SMTP_PASS)
             server.send_message(msg)
 
-        # sucesso
-        return True
+        msg_ok = f"[EMAIL] OK: {destinatario}"
+        print(msg_ok)
+        return True, msg_ok
 
     except Exception as e:
-        # log no console (útil para diagnosticar no Render)
-        print("❌ Erro ao enviar e-mail:", type(e).__name__, str(e))
-        return False
+        msg_erro = f"[EMAIL][ERRO] {type(e).__name__}: {str(e)}"
+        print(msg_erro)
+        return False, msg_erro
+
         
 
 UF_OPCOES = [
@@ -1470,18 +1459,32 @@ def processar_formulario(*args):
 
     # Envia e trata visualmente sem interromper o retorno dos outputs
     try:
-        ok = enviar_email(
+        ok, msg_email = enviar_email(
             destinatario=email_destinatario,
             assunto=assunto,
             corpo=corpo_email,
             reply_to="no-reply@ifgoiano.edu.br"
         )
+
         if ok:
+            # mensagem amigável para o usuário
             gr.Info("✅ TCE registrado e encaminhado com sucesso ao setor responsável.")
+            # log técnico (aparece nos logs do Render)
+            print(msg_email)
         else:
-            gr.Warning("⚠️ Não foi possível enviar o e-mail agora. Tente novamente mais tarde.")
+            # mensagem amigável
+            #gr.Warning("⚠️ Não foi possível enviar o e-mail agora. Tente novamente mais tarde.")
+            gr.Warning(msg_email)
+            # detalhes técnicos só nos logs
+            print(msg_email)
+
     except Exception as e:
-        gr.Warning("⚠️ [ERRO] Não foi possível enviar o e-mail agora. Tente novamente mais tarde.")
+        # se algo fora do enviar_email der erro
+        msg_erro_handler = f"[ENVIAR_EMAIL_HANDLER][ERRO] {type(e).__name__}: {e}"
+        print(msg_erro_handler)
+        #gr.Warning("⚠️ [ERRO] Não foi possível enviar o e-mail agora. Tente novamente mais tarde.")
+        gr.Warning(msg_erro_handler)
+
 
    
     RADIOS = {
